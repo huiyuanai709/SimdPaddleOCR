@@ -4,6 +4,7 @@
 
 纯 C# PP-OCRv6 推理库：多平台 SIMD 优化、较低内存占用、高正确率。
 自带托管 ONNX 解释器，不依赖 Paddle Inference、ONNX Runtime 或 OpenCV 原生库。
+1.3 在 AVX2 上对连续卷积段走图级 NHWC：tiny 相对 1.2 大约快 30%，medium 在本地 5800X 上反超同机 OpenVINO，准确率不变。
 
 核心 API 只接收 BGR8 内存，不负责图片解码，因此不会强制引入 ImageSharp、SkiaSharp 或 OpenCvSharp。
 
@@ -190,27 +191,28 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 
 ## 性能
 
-GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟（2026-09，4 次 CI 合计）：
+**1.3**：AVX2 上连续卷积段走图级 NHWC。CI 数字来自
+[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921)，只报同一 CPU。本机 tiny/small/medium × sharp/c/openvino 见 [`docs/perf.md`](docs/perf.md)。
 
-| 平台 | CPU | ISA | 中位 ms/图 | 工作集峰值 | 简评 |
-| --- | --- | --- | ---: | ---: | --- |
-| win-x64 | AMD EPYC 7763（4 vCPU） | AVX2 | **238** | ~790 MB | 默认路径；正确率跨 ISA 不变 |
-| win-x64 `netstandard2.0` | 同上 | AVX2（`Vector`） | 373 | ~785 MB | 约为 net10 AVX2 的 1.56× |
-| linux-arm64 | Neoverse N2 | AdvSimd | **273** | ~847 MB | replica 间几乎一条直线 |
+GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 
-同机引擎对比（win-x64 / EPYC 7763，tiny 4 worker；与上表不是同一批 VM，只看相对关系）：
+| 平台 | CPU | ISA | 中位 ms/图 | 工作集峰值 | 相对 1.2 |
+| --- | --- | --- | ---: | ---: | ---: |
+| win-x64 | AMD EPYC 7763（4 vCPU） | AVX2 | **160** | ~817 MB | **0.69×**（1.2 为 232 ms / ~786 MB） |
+| win-x64 `netstandard2.0` | 同上 | AVX2（`Vector`，无 NHWC） | 343 | ~775 MB | 0.95× |
+| linux-arm64 | Neoverse N2 | AdvSimd（无 NHWC） | **241** | ~840 MB | 0.88× |
 
-| 引擎 | 中位 ms/图 | 工作集峰值 | 行精确 | CER |
+同机引擎对比（win-x64 / EPYC 7763，tiny 4 worker；同 replica 比值，不要和上一张表的绝对毫秒硬接）：
+
+| 引擎 | 相对本库 4w | 工作集峰值 | 行精确 | CER |
 | --- | ---: | ---: | --- | ---: |
-| 本库 | **224** | **~790 MB** | **757/1022** | **3.53%** |
-| [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) | 281 | ~586 MB | 759/1022 | 4.18% |
-| [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | 214 | ~2600 MB | 698/1022 | 3.63% |
+| 本库 | **1.00** | **~817 MB** | **757/1022** | **3.53%** |
+| [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) | 1.81 | ~586 MB | 759/1022 | 4.18% |
+| [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | **1.38** | ~2600 MB | 698/1022 | 3.63% |
 
-lw.PPOCR.C 用的是 **2026 年 8 月底**的一份构建，不代表该项目最新版本。
+1.2 时 OpenVINO 同 replica 比值是 0.96（略快于本库）；1.3 翻成 1.38。上表 c 是 `34818949921` 里 **2026-09-05** 那份 DLL；测试现已改为 [`lw_ppocr_c.20260914.20d0de6.dll`](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)。本机 tiny/small/medium 对照见 [`docs/perf.md`](docs/perf.md)。
 
-简评：墙钟接近 OpenVINO.NET、比这份 lw.PPOCR.C 快约 26%；工作集约 OpenVINO.NET 的 1/3，比 C 高一截。正确率跨 Windows / Linux / macOS 与 scalar 都是 757/1022、CER 3.53%；CER 好于该份 C，行精确高于 OpenVINO.NET。
-
-完整环境、ISA 阶梯和读数规则见 [`docs/perf.md`](docs/perf.md)。
+完整环境、ISA 阶梯、1.2 历史基线和读数规则见 [`docs/perf.md`](docs/perf.md)。
 
 ## 性能复现
 

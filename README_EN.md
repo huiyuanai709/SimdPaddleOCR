@@ -4,6 +4,7 @@
 
 Pure C# PP-OCRv6 inference library: multi-platform SIMD, relatively low memory use, and high accuracy.
 It ships a managed ONNX interpreter and does not depend on Paddle Inference, ONNX Runtime, or OpenCV native libraries.
+1.3 runs contiguous convolution segments channels-last (graph-level NHWC) on AVX2: roughly 30% faster than 1.2 on tiny, and locally faster than same-machine OpenVINO on medium, with unchanged accuracy.
 
 The core API accepts packed BGR8 memory only. It does not decode images, so ImageSharp, SkiaSharp, or OpenCvSharp are not required.
 
@@ -190,27 +191,28 @@ respective owners. This project is not official and does not imply endorsement.
 
 ## Performance
 
-Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup (Sep 2026, four CI runs):
+**1.3**: graph-level NHWC on AVX2 for contiguous convolution segments. CI numbers from
+[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921), same CPU only. Local tiny/small/medium × sharp/c/openvino: [`docs/perf.md`](docs/perf.md) (Chinese).
 
-| Platform | CPU | ISA | Median ms/image | WS peak | Notes |
-| --- | --- | --- | ---: | ---: | --- |
-| win-x64 | AMD EPYC 7763 (4 vCPU) | AVX2 | **238** | ~790 MB | Default path; accuracy unchanged across ISAs |
-| win-x64 `netstandard2.0` | same | AVX2 (`Vector`) | 373 | ~785 MB | About 1.56× the net10 AVX2 path |
-| linux-arm64 | Neoverse N2 | AdvSimd | **273** | ~847 MB | Very tight replica spread |
+Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
 
-Same-machine engine comparison (win-x64 / EPYC 7763, tiny 4 workers; a different VM pool from the table above — use the ratios, not the absolute 224 vs 238):
+| Platform | CPU | ISA | Median ms/image | WS peak | vs 1.2 |
+| --- | --- | --- | ---: | ---: | ---: |
+| win-x64 | AMD EPYC 7763 (4 vCPU) | AVX2 | **160** | ~817 MB | **0.69×** (1.2: 232 ms / ~786 MB) |
+| win-x64 `netstandard2.0` | same | AVX2 (`Vector`, no NHWC) | 343 | ~775 MB | 0.95× |
+| linux-arm64 | Neoverse N2 | AdvSimd (no NHWC) | **241** | ~840 MB | 0.88× |
 
-| Engine | Median ms/image | WS peak | Exact lines | CER |
+Same-machine engine comparison (win-x64 / EPYC 7763, tiny 4 workers; same-replica ratios):
+
+| Engine | vs this library 4w | WS peak | Exact lines | CER |
 | --- | ---: | ---: | --- | ---: |
-| This library | **224** | **~790 MB** | **757/1022** | **3.53%** |
-| [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) | 281 | ~586 MB | 759/1022 | 4.18% |
-| [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | 214 | ~2600 MB | 698/1022 | 3.63% |
+| This library | **1.00** | **~817 MB** | **757/1022** | **3.53%** |
+| [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) | 1.81 | ~586 MB | 759/1022 | 4.18% |
+| [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | **1.38** | ~2600 MB | 698/1022 | 3.63% |
 
-The lw.PPOCR.C build is a **late-August 2026** snapshot and does not represent that project's latest release.
+In 1.2 the OpenVINO same-replica ratio was 0.96 (slightly faster than this library); 1.3 flips it to 1.38. The c column above is the **2026-09-05** DLL from `34818949921`; tests now download [`lw_ppocr_c.20260914.20d0de6.dll`](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll). Local tiny/small/medium comparison: [`docs/perf.md`](docs/perf.md).
 
-In short: wall time is close to OpenVINO.NET and about 26% faster than this lw.PPOCR.C snapshot; working set is about one-third of OpenVINO.NET and higher than C. Accuracy is 757/1022 lines and 3.53% CER on Windows / Linux / macOS and the scalar path; CER is better than that C snapshot, exact-line rate is higher than OpenVINO.NET.
-
-Full host/CPU notes, ISA ladder, and how to read the numbers: [`docs/perf.md`](docs/perf.md).
+Full host/CPU notes, ISA ladder, the 1.2 historical baseline, and how to read the numbers: [`docs/perf.md`](docs/perf.md).
 
 ## Reproducing performance
 

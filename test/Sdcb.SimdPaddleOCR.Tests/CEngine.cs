@@ -11,24 +11,25 @@ sealed class CEngine : IBenchEngine
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("--engine c requires Windows (lw_ppocr_c.dll)");
-        if (modelType != "tiny")
-            throw new ArgumentException("--engine c only supports --model tiny");
+        if (modelType is not ("tiny" or "small" or "medium"))
+            throw new ArgumentException("--engine c supports --model tiny|small|medium");
 
-        CAssets.EnsureAsync(cAssetsDir).GetAwaiter().GetResult();
-        CAssets.CopyDll(cAssetsDir);
-        string dictPath = CAssets.WriteDictionary(cAssetsDir);
-        Extra["cAssets"] = cAssetsDir;
-        Extra["cDll"] = CAssets.BaseUrl + CAssets.DllName;
-        Extra["cDet"] = CAssets.BaseUrl + CAssets.DetName;
-        Extra["cCls"] = CAssets.BaseUrl + CAssets.ClsName;
-        Extra["cRec"] = CAssets.BaseUrl + CAssets.RecName;
-        Extra["cDict"] = dictPath;
+        CAssetSet assets = CAssets.Resolve(cAssetsDir, modelType);
+        CAssets.CopyDll(assets.DllPath);
+        Extra["cAssets"] = assets.Directory;
+        Extra["cDll"] = assets.DllPath;
+        Extra["cDet"] = assets.DetPath;
+        Extra["cCls"] = assets.ClsPath;
+        Extra["cRec"] = assets.RecPath;
+        Extra["cDict"] = assets.DictPath;
+        Extra["cSource"] = assets.Source;
+        Extra["cRemoteDll"] = CAssets.BaseUrl + CAssets.RemoteDllName;
 
         _ocr = new NativeOcr(
-            CAssets.DetPath(cAssetsDir),
-            CAssets.ClsPath(cAssetsDir),
-            CAssets.RecPath(cAssetsDir),
-            dictPath,
+            assets.DetPath,
+            assets.ClsPath,
+            assets.RecPath,
+            assets.DictPath,
             useDirectionClassification: true,
             (uint)workers);
     }

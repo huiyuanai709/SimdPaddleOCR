@@ -1,6 +1,74 @@
-# Sdcb.SimdPaddleOCR 性能基准（2026-09）
+# Sdcb.SimdPaddleOCR 性能基准
 
-本文是当前仓库的 **CI 综合基线**，汇总 4 次 GitHub Actions `test` 工作流、共 **484** 份 JSON 报告。
+## 1.3（2026-09-14）
+
+核心包 **1.3.0**（`37fe1fd`）。AVX2+FMA 上对连续卷积段走图级 NHWC；`netstandard2.0` / ARM / `PPOCR_NHWC=0` 仍是 NCHW。
+
+### 本机引擎对比（tiny / small / medium）
+
+机器：Windows，AMD Ryzen 7 5800X（16 逻辑核），AVX2。数据集：仓库 `dataset/` 100 张合成 JPG，预解码 BGR，第 1 张 warmup，统计 n=99。4 个行级 worker，DET 长边 960。
+
+| 引擎 | 版本 |
+| --- | --- |
+| **sharp** | 本库 1.3.0（`37fe1fd`），`net10.0` |
+| **c** | [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) **`20d0de6`**（2026-09-14，CMake `0.2.0`）。本机 VS 2026 + Ninja 编 `lw_ppocr_c.dll`，`LW_EXPERIMENTAL_AVX2_FMA_DISPATCH=ON`。tiny 走正式转换器；small/medium LWM 走仓库里的 experimental dynamic 转换器。字典：tiny 用 `ppocrv6-tiny/ppocr_keys.txt`，small/medium 用 `PP-OCRv6_small_rec_dict.txt`。 |
+| **openvino** | `Sdcb.OpenVINO.PaddleOCR` 0.8.1 + `Sdcb.OpenVINO.runtime.win-x64` 2026.2.0 |
+
+墙钟是 mean ms/图（括号里是 median / p95）。相对时间以同行 **sharp=1.00**。这不是 CI replica，不要和后文 1.2 / 1.3 CI 中位毫秒硬接。
+
+| 模型 | 引擎 | mean (median / p95) | 相对 sharp | exact_lines | CER | WS peak |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| tiny | sharp | **87.8** (82.5 / 136) | **1.00** | 734/1026 | **2.71%** | 803 MB |
+| tiny | openvino | 132.3 (128.7 / 182) | 1.51 | 644/1026 | 3.55% | 2785 MB |
+| tiny | c | 185.8 (184.5 / 246) | 2.12 | 744/1026 | 4.01% | **539 MB** |
+| small | sharp | **237.5** (239.6 / 313) | **1.00** | **940/1026** | **0.61%** | 1211 MB |
+| small | openvino | 299.6 (295.2 / 401) | 1.26 | 722/1026 | 2.30% | 3239 MB |
+| small | c | 541.6 (540.6 / 688) | 2.28 | 926/1026 | 1.09% | **759 MB** |
+| medium | sharp | **640.5** (647.9 / 846) | **1.00** | 992/1026 | 0.68% | 2430 MB |
+| medium | openvino | 1077 (1063 / 1395) | 1.68 | 810/1026 | 1.74% | 4516 MB |
+| medium | c | 2193 (2208 / 2801) | 3.42 | **1004/1026** | **0.24%** | **1481 MB** |
+
+读法：
+
+- **速度**：三档都是 sharp 最快，openvino 其次，c 最慢。c/sharp 约 2.1×（tiny）、2.3×（small）、3.4×（medium）。
+- **准确率**：tiny / small 是 sharp CER 最好；只有 medium 是 c 更好（0.24% vs 0.68%）。openvino 三档 CER 都差一截，行精确也最低。
+- **内存**：c 最省，openvino 最肥（tiny 已近 2.8 GB，medium 4.5 GB）。
+- c 没有对外 profiler，上表没有 `det_graph` / `lines_wall`。
+
+JSON：`bench-out/csharp-tiny-4w.json`、`csharp-small-4w.json`、`v13-medium-4w-rerun.json`；`c-tiny-4w.json`、`c-small-4w.json`、`c-medium-4w.json`；`openvino-*-4w-local.json`。
+
+相对正式标签 **1.2.0**（`764dbd2`）同机 medium 4w：sharp 从 1507 ms 降到 641 ms（约 **0.43×**，吞吐 2.3×），CER 仍 0.68%（992/1026）。
+
+### CI（tiny 4w，同一 CPU）
+
+不要和上一张本机表的绝对毫秒混加。
+
+| 来源 | 提交 | 说明 |
+| --- | --- | --- |
+| [34303303418](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34303303418) | `764dbd2` | **1.2.0** |
+| [34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921) | `37fe1fd` | **1.3.0**（NHWC） |
+
+| 场景 | 1.2 | 1.3 | 相对时间 |
+| --- | ---: | ---: | ---: |
+| win-x64 EPYC 7763 AVX2，tiny 4w | 232 ms / peak 786 MB | **160 ms** / peak 817 MB | **0.69** |
+| 同上，强制 `noavx512` | 220 ms | **152 ms** | **0.69** |
+| win-x64 ns2（无 NHWC） | 361 ms | 343 ms | 0.95 |
+| linux-arm64 N2，tiny 4w（无 NHWC） | 273 ms | **241 ms** | 0.88 |
+| 同 replica OpenVINO / 本库 | 0.96 | **1.38** | 本库反超 |
+
+上表 CI 数字来自 `34818949921`，当时 c 还是 **2026-09-05** 的 `lw_ppocr_c.dll`。测试现已改为下载 [`lw_ppocr_c.20260914.20d0de6.dll`](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)（与本机表同一份），落盘名仍是 `lw_ppocr_c.dll`。下次引擎套件的 c/sharp 比值不要再用 1.76–1.93。
+
+1.3 回归阈值（替换文末 1.2 那三条）：
+
+1. **x64**：EPYC 7763 SIMD `tiny-4w` 中位应在约 **155–175 ms**；ns2 同 replica 比值大约 **2.0–2.2**。
+2. **ARM64**：N2 `tiny-4w` 应在约 **235–245 ms**。
+3. **引擎**：同 replica 上 OpenVINO / sharp 4w 应在 **1.35–1.41**。c 已钉到 `20d0de6`，c/sharp 比值等新 CI 再定。
+
+---
+
+## 1.2 历史基线（2026-09）
+
+以下到文末是 **1.2** 的 CI 综合基线：4 次 GitHub Actions `test` 工作流、共 **484** 份 JSON。数字不要当 1.3 的回归门禁。
 之后对比性能时，请按「同一 CPU 型号 + 同一有效 ISA + 同一套件」对照，不要把不同 runner 的绝对毫秒数混在一起。
 
 ## 怎么读
