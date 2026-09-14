@@ -192,7 +192,7 @@ respective owners. This project is not official and does not imply endorsement.
 ## Performance
 
 **1.3**: graph-level NHWC on AVX2 for contiguous convolution segments. CI numbers from
-[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921), same CPU only. Local tiny/small/medium × sharp/c/openvino: [`docs/perf.md`](docs/perf.md) (Chinese).
+[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921), same CPU only.
 
 Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
 
@@ -202,17 +202,20 @@ Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image 
 | win-x64 `netstandard2.0` | same | AVX2 (`Vector`, no NHWC) | 343 | ~775 MB | 0.95× |
 | linux-arm64 | Neoverse N2 | AdvSimd (no NHWC) | **241** | ~840 MB | 0.88× |
 
-Same-machine engine comparison (win-x64 / EPYC 7763, tiny 4 workers; same-replica ratios):
+In 1.2 the same-replica OpenVINO / this-library ratio was 0.96; 1.3 is **1.38** (this library ahead).
 
-| Engine | vs this library 4w | WS peak | Exact lines | CER |
-| --- | ---: | ---: | --- | ---: |
-| This library | **1.00** | **~817 MB** | **757/1022** | **3.53%** |
-| [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) | 1.81 | ~586 MB | 759/1022 | 4.18% |
-| [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | **1.38** | ~2600 MB | 698/1022 | 3.63% |
+Local engine comparison (Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images, n=99). c is [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) **`20d0de6`** ([2026-09-14 DLL](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)). Wall time is mean ms/image.
 
-In 1.2 the OpenVINO same-replica ratio was 0.96 (slightly faster than this library); 1.3 flips it to 1.38. The c column above is the **2026-09-05** DLL from `34818949921`; tests now download [`lw_ppocr_c.20260914.20d0de6.dll`](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll). Local tiny/small/medium comparison: [`docs/perf.md`](docs/perf.md).
+| Model | Engine | mean ms/image | vs this library | Exact lines | CER | WS peak |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| tiny | This library | **87.8** | **1.00** | 734/1026 | **2.71%** | 803 MB |
+| tiny | [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | 132 | 1.51 | 644/1026 | 3.55% | 2785 MB |
+| tiny | lw.PPOCR.C | 186 | 2.12 | 744/1026 | 4.01% | **539 MB** |
+| medium | This library | **641** | **1.00** | 992/1026 | 0.68% | 2430 MB |
+| medium | OpenVINO.NET | 1077 | 1.68 | 810/1026 | 1.74% | 4516 MB |
+| medium | lw.PPOCR.C | 2193 | 3.42 | **1004/1026** | **0.24%** | **1481 MB** |
 
-Full host/CPU notes, ISA ladder, the 1.2 historical baseline, and how to read the numbers: [`docs/perf.md`](docs/perf.md).
+Same-machine medium 4w vs this library 1.2.0: 1507 → **641 ms** (about 0.43×), CER still 0.68%. small and how to read the numbers: [`docs/perf.md`](docs/perf.md).
 
 ## Reproducing performance
 

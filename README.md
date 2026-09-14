@@ -192,7 +192,7 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 ## 性能
 
 **1.3**：AVX2 上连续卷积段走图级 NHWC。CI 数字来自
-[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921)，只报同一 CPU。本机 tiny/small/medium × sharp/c/openvino 见 [`docs/perf.md`](docs/perf.md)。
+[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921)，只报同一 CPU。
 
 GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 
@@ -202,17 +202,20 @@ GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 | win-x64 `netstandard2.0` | 同上 | AVX2（`Vector`，无 NHWC） | 343 | ~775 MB | 0.95× |
 | linux-arm64 | Neoverse N2 | AdvSimd（无 NHWC） | **241** | ~840 MB | 0.88× |
 
-同机引擎对比（win-x64 / EPYC 7763，tiny 4 worker；同 replica 比值，不要和上一张表的绝对毫秒硬接）：
+1.2 时同 replica OpenVINO / 本库是 0.96；1.3 为 **1.38**（本库反超）。
 
-| 引擎 | 相对本库 4w | 工作集峰值 | 行精确 | CER |
-| --- | ---: | ---: | --- | ---: |
-| 本库 | **1.00** | **~817 MB** | **757/1022** | **3.53%** |
-| [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) | 1.81 | ~586 MB | 759/1022 | 4.18% |
-| [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | **1.38** | ~2600 MB | 698/1022 | 3.63% |
+本机引擎对比（Ryzen 7 5800X，4 worker，仓库 `dataset/` 100 张，n=99）。c 为 [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) **`20d0de6`**（[2026-09-14 DLL](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)）。墙钟是 mean ms/图。
 
-1.2 时 OpenVINO 同 replica 比值是 0.96（略快于本库）；1.3 翻成 1.38。上表 c 是 `34818949921` 里 **2026-09-05** 那份 DLL；测试现已改为 [`lw_ppocr_c.20260914.20d0de6.dll`](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)。本机 tiny/small/medium 对照见 [`docs/perf.md`](docs/perf.md)。
+| 模型 | 引擎 | mean ms/图 | 相对本库 | 行精确 | CER | 工作集峰值 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| tiny | 本库 | **87.8** | **1.00** | 734/1026 | **2.71%** | 803 MB |
+| tiny | [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | 132 | 1.51 | 644/1026 | 3.55% | 2785 MB |
+| tiny | lw.PPOCR.C | 186 | 2.12 | 744/1026 | 4.01% | **539 MB** |
+| medium | 本库 | **641** | **1.00** | 992/1026 | 0.68% | 2430 MB |
+| medium | OpenVINO.NET | 1077 | 1.68 | 810/1026 | 1.74% | 4516 MB |
+| medium | lw.PPOCR.C | 2193 | 3.42 | **1004/1026** | **0.24%** | **1481 MB** |
 
-完整环境、ISA 阶梯、1.2 历史基线和读数规则见 [`docs/perf.md`](docs/perf.md)。
+medium 相对本库 1.2.0 同机 4w：1507 → **641 ms**（约 0.43×），CER 仍 0.68%。small 和读数规则见 [`docs/perf.md`](docs/perf.md)。
 
 ## 性能复现
 
