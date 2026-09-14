@@ -14,12 +14,13 @@ namespace Sdcb.SimdPaddleOCR.OnnxSharp;
 /// <see cref="Reshape"/> to retarget the session to a new input shape without
 /// recompiling the model.
 /// </summary>
-public sealed class InferenceSession : IDisposable
+public sealed partial class InferenceSession : IDisposable
 {
     private static bool s_profileEnabled;
     private static readonly bool s_dumpConv = Environment.GetEnvironmentVariable("PPOCR_DUMP_CONV") is not null;
-    private static readonly long[] s_profileTicks = new long[26];
-    private static readonly long[] s_profileCalls = new long[26];
+    private static readonly bool s_dumpNodes = Environment.GetEnvironmentVariable("PPOCR_DUMP_NODES") is not null;
+    private static readonly long[] s_profileTicks = new long[32];
+    private static readonly long[] s_profileCalls = new long[32];
     private static readonly long[] s_profileConvClassTicks = new long[5];
     private static readonly long[] s_profileConvClassCalls = new long[5];
     private static readonly long[] s_profileNodeTicks = new long[512];
@@ -540,6 +541,13 @@ public sealed class InferenceSession : IDisposable
                     foreach (KeyValuePair<string, long> e in s_convShapeTicks.OrderByDescending(static e => e.Value))
                         Console.Error.WriteLine($"conv-shape {e.Value * 1000.0 / Stopwatch.Frequency,10:F1}ms  {e.Key}");
             };
+        if (s_dumpNodes)
+            AppDomain.CurrentDomain.ProcessExit += static (_, _) =>
+            {
+                lock (s_nodeShapeTicks)
+                    foreach (KeyValuePair<string, (long Ticks, long Calls)> e in s_nodeShapeTicks.OrderByDescending(static e => e.Value.Ticks))
+                        Console.Error.WriteLine($"node {e.Value.Ticks * 1000.0 / Stopwatch.Frequency,10:F1}ms {e.Value.Calls,6}x {e.Value.Ticks * 1000.0 / Stopwatch.Frequency / e.Value.Calls,8:F3}ms  {e.Key}");
+            };
     }
 
     private static int ProfileConvClass(TensorValue input, TensorValue weights, ReadOnlySpan<byte> p)
@@ -563,7 +571,7 @@ public sealed class InferenceSession : IDisposable
         NodeTrace[] traces = new NodeTrace[_model.Nodes.Length];
         for (int ni = 0; ni < _model.Nodes.Length; ni++)
         {
-            ExecuteNode(_model.Nodes[ni]);
+            ExecuteNode(_model.Nodes[ni], ni);
             TensorValue o = _tensors[_model.Nodes[ni].Outputs[0]];
             Span<float> data = o.Data;
             float min = float.PositiveInfinity, max = float.NegativeInfinity;
@@ -609,8 +617,60 @@ public sealed class InferenceSession : IDisposable
 
     private int ExecuteStep(int ni)
     {
+        if (s_dumpNodes)
+        {
+            long t0 = Stopwatch.GetTimestamp();
+            int consumed = ExecuteStepCore(ni);
+            AccumulateNodeShape(ni, consumed, Stopwatch.GetTimestamp() - t0);
+            return consumed;
+        }
+        return ExecuteStepCore(ni);
+    }
+
+    private void AccumulateNodeShape(int ni, int consumed, long elapsed)
+    {
+        NodeRecord node = _model.Nodes[ni];
+        int[] id = _tensors[node.Inputs[0]].Shape, od = _tensors[node.Outputs[0]].Shape;
+        string extra = "";
+        if (node.Operator == OperatorId.Conv)
+        {
+            ReadOnlySpan<byte> p = _model.GetParameters(node);
+            extra = $" k={I32(p, 8)}x{I32(p, 12)} s={I32(p, 16)}x{I32(p, 20)} g={U32(p, 4)}";
+        }
+        else if (node.Operator == OperatorId.MatMul)
+            extra = $" w=[{string.Join(",", _tensors[node.Inputs[1]].Shape)}]";
+        string key = $"{_model.Nodes.Length,3}n {ni,3}+{consumed} {node.Operator,-12}{extra} in=[{string.Join(",", id)}] out=[{string.Join(",", od)}]";
+        lock (s_nodeShapeTicks)
+        {
+            s_nodeShapeTicks[key] = s_nodeShapeTicks.TryGetValue(key, out (long Ticks, long Calls) t)
+                ? (t.Ticks + elapsed, t.Calls + 1) : (elapsed, 1);
+        }
+    }
+
+    private static readonly Dictionary<string, (long Ticks, long Calls)> s_nodeShapeTicks = [];
+
+    private int ExecuteStepCore(int ni)
+    {
         long started = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
         int skip = _compiled.FusedSkip(ni);
+        if (skip == 8)
+        {
+            if (!TryExecuteLayerNorm(ni))
+                throw new InvalidOperationException($"LayerNorm fusion failed at node {ni}.");
+            if (s_profileEnabled) AddProfile((int)OperatorId.ReduceMean, started, ni);
+            return skip;
+        }
+        if (skip == 6)
+        {
+            if (!TryExecuteConvBiasGelu(ni))
+                throw new InvalidOperationException($"Conv+GELU fusion failed at node {ni}.");
+            if (s_profileEnabled)
+            {
+                AddProfile((int)OperatorId.Conv, started, ni);
+                AddConvClassProfile(_model.Nodes[ni], started);
+            }
+            return skip;
+        }
         if (skip == 4)
         {
             if (!TryExecuteGelu(ni))
@@ -675,7 +735,7 @@ public sealed class InferenceSession : IDisposable
             if (s_profileEnabled) AddProfile((int)node.Operator, started, ni);
             return 0;
         }
-        ExecuteNode(node);
+        ExecuteNode(node, ni);
         if (s_profileEnabled)
         {
             AddProfile((int)node.Operator, started, ni);
@@ -684,9 +744,16 @@ public sealed class InferenceSession : IDisposable
         return 0;
     }
 
-    private void ExecuteNode(NodeRecord node)
+    private void ExecuteNode(NodeRecord node, int nodeIndex)
     {
         ReadOnlySpan<byte> p = _model.GetParameters(node); TensorValue o = _tensors[node.Outputs[0]]; TensorValue x = _tensors[node.Inputs[0]];
+        if (node.Operator == OperatorId.LayoutConvert)
+        {
+            LayoutConvert(x, p, o);
+            return;
+        }
+        if (_compiled.IsNhwcNode(nodeIndex) && ExecuteNhwcNode(node, nodeIndex, p, x, o))
+            return;
         switch (node.Operator)
         {
             case OperatorId.Add: Binary<AddOp>(x, _tensors[node.Inputs[1]], o, _intraOpThreads); break;
@@ -701,7 +768,7 @@ public sealed class InferenceSession : IDisposable
             case OperatorId.HardSigmoid: { float alpha = F32(p, 4), beta = F32(p, 8); SimdKernels.HardSigmoid(x.Data, o.Data, alpha, beta); break; }
             case OperatorId.BatchNormalization: BatchNorm(x, node, o); break;
             case OperatorId.Conv:
-                ExecuteConv(node, o, node.Inputs.Length > 2 ? _tensors[node.Inputs[2]] : null);
+                ExecuteConv(node, nodeIndex, o, node.Inputs.Length > 2 ? _tensors[node.Inputs[2]] : null);
                 break;
             case OperatorId.ConvTranspose: ConvTranspose(x, _tensors[node.Inputs[1]], node.Inputs.Length > 2 ? _tensors[node.Inputs[2]] : null, p, o, _intraOpThreads); break;
             case OperatorId.ReduceMean: ReduceMean(x, p, o); break;
@@ -717,6 +784,7 @@ public sealed class InferenceSession : IDisposable
             case OperatorId.Concat: Concat(node, p, o); break;
             case OperatorId.MatMul:
                 _compiled.TryGetPackedMatMul(node.Inputs[1], out float[]? packedMatMul);
+                if (LayoutPlanner.IsEnabled && TryMatMulNhwc(node, x, _tensors[node.Inputs[1]], o)) break;
                 MatMul(x, _tensors[node.Inputs[1]], o, packedMatMul); break;
             case OperatorId.Softmax: Softmax(x, p, o); break;
             case OperatorId.Resize: Resize(x, p, o); break;
@@ -770,11 +838,19 @@ public sealed class InferenceSession : IDisposable
         return tensor.IsConstant && tensor.Length == 1 && tensor.Data[0] == expected;
     }
 
-    private void ExecuteConv(NodeRecord conv, TensorValue output, TensorValue? bias,
-        ReadOnlySpan<float> residual = default)
+    private void ExecuteConv(NodeRecord conv, int nodeIndex, TensorValue output, TensorValue? bias,
+        ReadOnlySpan<float> residual = default, NhwcActivation activation = NhwcActivation.None,
+        float alpha = 0f, float beta = 0f)
     {
         ReadOnlySpan<byte> p = _model.GetParameters(conv);
         TensorValue x = _tensors[conv.Inputs[0]];
+        if (_compiled.IsNhwcNode(nodeIndex))
+        {
+            ConvNhwc(conv, x, output, bias, p, residual, activation, alpha, beta);
+            return;
+        }
+        if (activation != NhwcActivation.None)
+            throw new InvalidOperationException("Fused activation is only available on the NHWC path.");
         float[]? packed = _model.GetPackedWeights(conv, Model.PackConv1x1);
         float[]? packedOc16 = _model.GetPackedWeights(conv, Model.PackConv1x1Oc16);
         float[]? packedOc8 = _model.GetPackedWeights(conv, Model.PackConv1x1Oc8);
@@ -811,7 +887,7 @@ public sealed class InferenceSession : IDisposable
             _tensors[conv.Inputs[0]].Overlaps(addOutput))
             return false;
         convOutput.ShareStorageWith(addOutput);
-        ExecuteConv(conv, addOutput, bias);
+        ExecuteConv(conv, index, addOutput, bias);
         return true;
     }
 
@@ -844,6 +920,20 @@ public sealed class InferenceSession : IDisposable
             destination.Shape.Length != 4 || bias.Length != destination.Shape[1])
             return false;
         TensorValue input = _tensors[conv.Inputs[0]];
+        if (_compiled.IsNhwcNode(index))
+        {
+            if (!input.Overlaps(destination) && !PartialOverlap(residual, destination))
+            {
+                convOutput.ShareStorageWith(destination);
+                biasAddOutput.ShareStorageWith(destination);
+                ExecuteConv(conv, index, destination, bias, residual.Data);
+                return true;
+            }
+            convOutput.ShareStorageWith(biasAddOutput);
+            ExecuteConv(conv, index, convOutput, bias);
+            Binary<AddOp>(convOutput, residual, destination, _intraOpThreads);
+            return true;
+        }
         float[]? packedOc8 = _model.GetPackedWeights(conv, Model.PackConv1x1Oc8);
         int oc = destination.Shape[1], ic = input.Shape[1];
         if (packedOc8 is not null &&
@@ -852,11 +942,11 @@ public sealed class InferenceSession : IDisposable
         {
             convOutput.ShareStorageWith(destination);
             biasAddOutput.ShareStorageWith(destination);
-            ExecuteConv(conv, destination, bias, residual.Data);
+            ExecuteConv(conv, index, destination, bias, residual.Data);
             return true;
         }
         convOutput.ShareStorageWith(biasAddOutput);
-        ExecuteConv(conv, convOutput, bias);
+        ExecuteConv(conv, index, convOutput, bias);
         Binary<AddOp>(convOutput, residual, destination, _intraOpThreads);
         return true;
     }
@@ -881,7 +971,13 @@ public sealed class InferenceSession : IDisposable
         // The two tensors have identical shapes, and the ReLU is the sole
         // consumer of the convolution result, so no live value is overwritten.
         convOutput.ShareStorageWith(reluOutput);
-        ExecuteNode(conv);
+        if (_compiled.IsNhwcNode(index))
+        {
+            ExecuteConv(conv, index, reluOutput, conv.Inputs.Length > 2 ? _tensors[conv.Inputs[2]] : null,
+                activation: NhwcActivation.Relu);
+            return true;
+        }
+        ExecuteNode(conv, index);
         SimdKernels.Relu(reluOutput.Data, reluOutput.Data);
         return true;
     }
@@ -933,7 +1029,13 @@ public sealed class InferenceSession : IDisposable
         ReadOnlySpan<byte> p = _model.GetParameters(hardSigmoid);
         if (p.Length < 16) return false;
         convOutput.ShareStorageWith(destination);
-        ExecuteNode(conv);
+        if (_compiled.IsNhwcNode(index))
+        {
+            ExecuteConv(conv, index, destination, conv.Inputs.Length > 2 ? _tensors[conv.Inputs[2]] : null,
+                activation: NhwcActivation.HardSwish, alpha: F32(p, 4), beta: F32(p, 8));
+            return true;
+        }
+        ExecuteNode(conv, index);
         SimdKernels.HardSwish(destination.Data, destination.Data, F32(p, 4), F32(p, 8));
         return true;
     }
@@ -964,7 +1066,12 @@ public sealed class InferenceSession : IDisposable
         // constant and apply ReLU.  The original graph performs the same
         // operations in this order, so floating-point accumulation is unchanged.
         transposeOutput.ShareStorageWith(reluOutput);
-        ExecuteNode(transpose);
+        if (_compiled.IsNhwcNode(index))
+        {
+            ConvTransposeNhwc(transpose, _tensors[transpose.Inputs[0]], reluOutput, bias.Data, NhwcActivation.Relu);
+            return true;
+        }
+        ExecuteNode(transpose, index);
         int channels = reluOutput.Shape[1], plane = reluOutput.Length / (reluOutput.Shape[0] * channels);
         for (int batch = 0; batch < reluOutput.Shape[0]; batch++)
             for (int channel = 0; channel < channels; channel++)
@@ -999,7 +1106,12 @@ public sealed class InferenceSession : IDisposable
         if (_tensors[transpose.Inputs[0]].Overlaps(sigmoidOutput)) return false;
 
         transposeOutput.ShareStorageWith(sigmoidOutput);
-        ExecuteNode(transpose);
+        if (_compiled.IsNhwcNode(index))
+        {
+            ConvTransposeNhwc(transpose, _tensors[transpose.Inputs[0]], sigmoidOutput, bias.Data, NhwcActivation.Sigmoid);
+            return true;
+        }
+        ExecuteNode(transpose, index);
         int channels = sigmoidOutput.Shape[1], plane = sigmoidOutput.Length / (sigmoidOutput.Shape[0] * channels);
         for (int batch = 0; batch < sigmoidOutput.Shape[0]; batch++)
             for (int channel = 0; channel < channels; channel++)
@@ -1044,7 +1156,7 @@ public sealed class InferenceSession : IDisposable
             node.Inputs.Length < 2 || source.StorageEquals(_tensors[node.Inputs[1]]))
             return false;
 
-        ExecuteNode(node);
+        ExecuteNode(node, nodeIndex);
         return true;
     }
 
@@ -1079,6 +1191,17 @@ public sealed class InferenceSession : IDisposable
             for (int block = 0; block < outer; block++)
                 SimdKernels.Elementwise<TOp>(a.Data.Slice(block * channel, channel), b.Data,
                     o.Data.Slice(block * channel, channel));
+            return;
+        }
+        // Row-scalar broadcast ([.., L, C] ∘ [.., L, 1]): one scalar per row.
+        if (ad.Length == bd.Length && ad.SequenceEqual(od) && bd[^1] == 1 &&
+            ad.AsSpan(0, rank - 1).SequenceEqual(bd.AsSpan(0, rank - 1)) && ad[^1] > 0)
+        {
+            int rowLength = ad[^1], rows = o.Length / rowLength;
+            ReadOnlySpan<float> scalars = b.Data;
+            for (int row = 0; row < rows; row++)
+                SimdKernels.ElementwiseScalar<TOp>(a.Data.Slice(row * rowLength, rowLength), scalars[row],
+                    o.Data.Slice(row * rowLength, rowLength));
             return;
         }
         TOp op = default;
@@ -1325,6 +1448,21 @@ public sealed class InferenceSession : IDisposable
             Sdcb.SimdPaddleOCR.Kernels.ReduceMean.SpatialNchw(x.Data, o.Data, x.Shape[0], x.Shape[1], spatial);
             return;
         }
+        // Trailing-axis mean (LayerNorm statistics): one contiguous row per output.
+        if (rank >= 1 && reduced[rank - 1] && reduction == x.Shape[rank - 1] && x.Shape[rank - 1] > 0)
+        {
+            int rowLength = x.Shape[rank - 1], rows = x.Length / rowLength;
+            ReadOnlySpan<float> rowsData = x.Data;
+            Span<float> means = o.Data;
+            for (int row = 0; row < rows; row++)
+            {
+                ReadOnlySpan<float> values = rowsData.Slice(row * rowLength, rowLength);
+                float sum = 0f;
+                for (int i = 0; i < rowLength; i++) sum += values[i];
+                means[row] = sum / reduction;
+            }
+            return;
+        }
         int[] outputStrides = new int[o.Shape.Length];
         int stride = 1;
         for (int a = o.Shape.Length - 1; a >= 0; a--) { outputStrides[a] = stride; stride = checked(stride * o.Shape[a]); }
@@ -1389,10 +1527,40 @@ public sealed class InferenceSession : IDisposable
     private static void Transpose(TensorValue x, ReadOnlySpan<byte> p, TensorValue o)
     {
         int rank = x.Shape.Length, n = U16(p, 2);
-        int[] perm = new int[n];
-        for (int i = 0; i < n; i++) perm[i] = I32(p, 4 + i * 4);
-        ReadOnlySpan<float> xData = x.Data; Span<float> oData = o.Data;
-        for (int oi = 0; oi < oData.Length; oi++) { int rem = oi, ii = 0; for (int ax = rank - 1; ax >= 0; ax--) { int c = rem % o.Shape[ax]; rem /= o.Shape[ax]; ii += c * Stride(x.Shape, perm[ax]); } oData[oi] = xData[ii]; }
+        if (n != rank || rank == 0 || rank > 8) throw new InvalidDataException("Transpose permutation rank mismatch.");
+        Span<int> strides = stackalloc int[rank];
+        for (int ax = 0; ax < rank; ax++) strides[ax] = Stride(x.Shape, I32(p, 4 + ax * 4));
+        StridedCopy(x.Data, o.Data, o.Shape, strides, 0);
+    }
+
+    // Walks the output in row-major order while tracking the input offset with
+    // one stride per output axis (Transpose / Slice); contiguous innermost runs
+    // become block copies. Replaces the per-element div/mod index decode.
+    private static void StridedCopy(ReadOnlySpan<float> source, Span<float> destination, int[] outShape,
+        ReadOnlySpan<int> inStrides, int baseOffset)
+    {
+        int rank = outShape.Length;
+        if (destination.Length == 0) return;
+        int inner = outShape[rank - 1], innerStride = inStrides[rank - 1];
+        int outer = destination.Length / inner;
+        Span<int> counters = stackalloc int[8];
+        counters.Clear();
+        int offset = baseOffset;
+        for (int run = 0; run < outer; run++)
+        {
+            Span<float> dst = destination.Slice(run * inner, inner);
+            if (innerStride == 1) source.Slice(offset, inner).CopyTo(dst);
+            else
+                for (int i = 0, s = offset; i < inner; i++, s += innerStride) dst[i] = source[s];
+            for (int ax = rank - 2; ax >= 0; ax--)
+            {
+                counters[ax]++;
+                offset += inStrides[ax];
+                if (counters[ax] < outShape[ax]) break;
+                offset -= counters[ax] * inStrides[ax];
+                counters[ax] = 0;
+            }
+        }
     }
     private void Concat(NodeRecord n, ReadOnlySpan<byte> p, TensorValue o)
     {
@@ -1561,19 +1729,16 @@ public sealed class InferenceSession : IDisposable
     {
         (int[] starts, int[] steps) = _compiled.ResolveSliceBounds(x.Shape, node, out _);
         int rank = x.Shape.Length;
-        ReadOnlySpan<float> xData = x.Data;
-        Span<float> oData = o.Data;
-        for (int outputIndex = 0; outputIndex < oData.Length; outputIndex++)
+        if (rank == 0 || rank > 8) throw new InvalidDataException("Slice rank is not supported.");
+        Span<int> strides = stackalloc int[rank];
+        int baseOffset = 0;
+        for (int axis = 0; axis < rank; axis++)
         {
-            int remainder = outputIndex, inputIndex = 0;
-            for (int axis = rank - 1; axis >= 0; axis--)
-            {
-                int coordinate = remainder % o.Shape[axis];
-                remainder /= o.Shape[axis];
-                inputIndex += (starts[axis] + coordinate * steps[axis]) * Stride(x.Shape, axis);
-            }
-            oData[outputIndex] = xData[inputIndex];
+            int stride = Stride(x.Shape, axis);
+            strides[axis] = steps[axis] * stride;
+            baseOffset += starts[axis] * stride;
         }
+        StridedCopy(x.Data, o.Data, o.Shape, strides, baseOffset);
     }
 
     private static ushort U16(ReadOnlySpan<byte> p, int o) => BinaryPrimitives.ReadUInt16LittleEndian(p[o..]);

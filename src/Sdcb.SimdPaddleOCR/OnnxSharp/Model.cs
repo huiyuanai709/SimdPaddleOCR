@@ -7,7 +7,7 @@ namespace Sdcb.SimdPaddleOCR.OnnxSharp;
 /// <summary>Validated ONNX model. The serialized source is released after parsing.</summary>
 public sealed class Model : IDisposable
 {
-    internal const uint TensorConstant = 1, TensorInput = 2, TensorOutput = 4;
+    internal const uint TensorConstant = 1, TensorInput = 2, TensorOutput = 4, TensorNhwc = 8;
     // The serialized ONNX payload is only needed while parsing. Tensor data
     // and node parameters are copied into their own arrays below, so retaining
     // the original file here would unnecessarily keep the (often very large)
@@ -56,7 +56,8 @@ public sealed class Model : IDisposable
 
     // Pack kinds mirror the loops previously in CompiledModel, plus OC-major 1x1.
     internal const int PackMatMul = 0, PackConv3x3 = 1, PackConv1x1 = 2, PackConv1x1Oc16 = 3,
-        PackConv1x1Oc8 = 4, PackConvDense8 = 5, PackDepthwise9 = 6;
+        PackConv1x1Oc8 = 4, PackConvDense8 = 5, PackDepthwise9 = 6,
+        PackNhwcDense = 7, PackNhwcDepthwise = 8, PackNhwcConvTranspose = 9, PackMatMulNhwc = 10;
 
     /// <summary>
     /// Returns the packed weights for a node's weight input, computing and
@@ -157,9 +158,45 @@ public sealed class Model : IDisposable
             return packed;
         }
 
+        if (packKind == PackMatMulNhwc)
+        {
+            // [k][n] -> [n/16][k][16] for the channels-last GEMM; the wide CTC
+            // projection keeps its own packed/argmax path.
+            if (node.Operator != OperatorId.MatMul || dims.Length != 2 || dims[0] < 1 ||
+                dims[1] < 16 || (dims[1] & 15) != 0 || dims[1] >= 1024)
+                return null;
+            int inner = dims[0], columns = dims[1], tiles = columns / 16;
+            float[] packed = new float[checked(inner * columns)];
+            for (int tile = 0; tile < tiles; tile++)
+                for (int k = 0; k < inner; k++)
+                    w.Slice(k * columns + tile * 16, 16).CopyTo(packed.AsSpan((tile * inner + k) * 16, 16));
+            return packed;
+        }
+
+        if (node.Operator == OperatorId.ConvTranspose)
+        {
+            if (packKind != PackNhwcConvTranspose) return null;
+            ReadOnlySpan<byte> tp = GetParameters(node);
+            if (tp.Length < 48 || dims.Length != 4 || dims[2] != 2 || dims[3] != 2 || U32(tp, 4) != 1 ||
+                (dims[1] != 1 && (dims[1] & 15) != 0))
+                return null;
+            return Nhwc.PackConvTranspose2x2(w, dims[0], dims[1]);
+        }
         if (node.Operator != OperatorId.Conv) return null;
         ReadOnlySpan<byte> p = GetParameters(node);
         if (p.Length < 48) return null;
+
+        if (packKind == PackNhwcDense)
+        {
+            if (U32(p, 4) != 1 || dims.Length != 4 || dims[0] < 16 || (dims[0] & 15) != 0) return null;
+            return Nhwc.PackDense(w, dims[0], dims[1], dims[2] * dims[3]);
+        }
+        if (packKind == PackNhwcDepthwise)
+        {
+            uint group = U32(p, 4);
+            if (group <= 1 || dims.Length != 4 || dims[1] != 1 || dims[0] != group || (dims[0] & 7) != 0) return null;
+            return Nhwc.PackDepthwise(w, dims[0], dims[2] * dims[3]);
+        }
 
         if (packKind == PackConv3x3)
         {
@@ -333,6 +370,7 @@ public sealed class Model : IDisposable
         int opset = checked((int)(parsed.Opsets.FirstOrDefault(static x => x.Domain.Length == 0 || x.Domain == "ai.onnx")?.Version ?? 0));
         BuildOnnxRecords(graph, opset, out TensorRecord[] tensors, out NodeRecord[] nodes,
             out uint[] inputs, out uint[] outputs, out byte[][] tensorData, out byte[][] nodeParameters);
+        LayoutPlanner.Apply(ref tensors, ref nodes, ref tensorData, ref nodeParameters, inputs, outputs);
         ulong weightSize = checked((ulong)tensorData.Sum(static x => x.LongLength));
         ModelInfo info = new(checked((ushort)MathCompat.Clamp(parsed.IrVersion, 0, ushort.MaxValue)), 0,
             checked((uint)tensors.Length), checked((uint)nodes.Length),
@@ -1051,7 +1089,9 @@ public enum OperatorId : ushort
     Unknown = 0,
     Conv = 1, Add, Mul, Div, Erf, HardSigmoid, BatchNormalization, ReduceMean,
     Relu, AveragePool, Squeeze, Transpose, Unsqueeze, MatMul, Softmax, Reshape, Concat, ConvTranspose, MaxPool, Resize, Sigmoid,
-    Sub, Pow, Sqrt, Slice
+    Sub, Pow, Sqrt, Slice,
+    /// <summary>Synthetic NCHW/NHWC storage conversion inserted by <see cref="LayoutPlanner"/>.</summary>
+    LayoutConvert
 }
 internal readonly record struct TensorRecord(DType DType, uint Rank, int[] Dimensions, uint Flags);
 internal readonly record struct NodeRecord(OperatorId Operator, uint[] Inputs, uint[] Outputs, uint ParameterIndex,

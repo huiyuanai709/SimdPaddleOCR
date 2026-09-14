@@ -25,6 +25,14 @@ internal static partial class SimdKernels
 
     private static readonly Vector256<float> VHalf = Vector256.Create(0.5f);
 
+    /// <summary>One vector of <see cref="Gelu"/>: identical operation order to the AVX loop so fused epilogues match it bit-for-bit.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector256<float> GeluVector(Vector256<float> value)
+    {
+        Vector256<float> activated = Avx.Add(ErfVector(Avx.Multiply(value, VInvSqrtTwo)), VOne);
+        return Avx.Multiply(Avx.Multiply(value, activated), VHalf);
+    }
+
     private static readonly Vector256<float> VSmall0 = Vector256.Create(1.0590875083315439e-6f);
 
     private static readonly Vector256<float> VSmall1 = Vector256.Create(-1.3906452410711274e-5f);

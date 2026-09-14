@@ -20,6 +20,7 @@ public sealed class CompiledModel
     private readonly byte[] _fusedSkip;
     private readonly int[] _inplaceSource;
     private readonly int[]? _defaultInputShape;
+    private readonly bool[] _nodeNhwc;
     private bool _disposed;
 
     internal CompiledModel(Model model, int intraOpThreads)
@@ -42,14 +43,25 @@ public sealed class CompiledModel
                 _lastUse[checked((int)input)] = ni;
         foreach (uint output in model.GraphOutputs)
             _lastUse[checked((int)output)] = model.Nodes.Length;
-        ExtendLastUseForFusedKernels();
         for (int i = 0; i < _tensors.Length; i++)
         {
             TensorRecord t = model.Tensors[i];
             int[] dims = t.Dimensions.Take(checked((int)t.Rank)).ToArray();
             _tensors[i] = new TensorMeta((DType)t.DType, dims,
-                (t.Flags & Model.TensorConstant) != 0 ? model.GetTensorBytes(i) : []);
+                (t.Flags & Model.TensorConstant) != 0 ? model.GetTensorBytes(i) : [],
+                (t.Flags & Model.TensorNhwc) != 0);
         }
+        _nodeNhwc = new bool[model.Nodes.Length];
+        for (int ni = 0; ni < model.Nodes.Length; ni++)
+        {
+            NodeRecord node = model.Nodes[ni];
+            if (node.Operator == OperatorId.LayoutConvert) continue;
+            bool nhwc = false;
+            foreach (uint t in node.Inputs) nhwc |= t != uint.MaxValue && _tensors[t].IsNhwc;
+            foreach (uint t in node.Outputs) nhwc |= t != uint.MaxValue && _tensors[t].IsNhwc;
+            _nodeNhwc[ni] = nhwc;
+        }
+        ExtendLastUseForFusedKernels();
     }
 
     /// <summary>Creates a compiled model whose requests default to <paramref name="inputShape"/>.</summary>
@@ -103,6 +115,9 @@ public sealed class CompiledModel
         => _lastUse[checked((int)tensorIndex)] > nodeIndex;
     internal bool IsGraphOutput(int tensorIndex) => _model.GraphOutputs.Contains((uint)tensorIndex);
     internal int FusedSkip(int nodeIndex) => _fusedSkip[nodeIndex];
+    /// <summary>True when the node's activations are stored channels-last.</summary>
+    internal bool IsNhwcNode(int nodeIndex) => _nodeNhwc[nodeIndex];
+    internal bool IsNhwcTensor(uint tensorIndex) => _tensors[checked((int)tensorIndex)].IsNhwc;
     internal int ElementwiseInPlaceSource(int outputTensor) => _inplaceSource[outputTensor];
 
     // Same patterns InferenceSession fuses at runtime, decided once. Conv
@@ -115,11 +130,29 @@ public sealed class CompiledModel
         NodeRecord[] nodes = _model.Nodes;
         for (int i = 0; i < nodes.Length; i++)
         {
+            if (MatchLayerNorm(nodes, i))
+            {
+                StretchLastUse(nodes[i].Inputs[0], i + 8);
+                _fusedSkip[i] = 8;
+                i += 8;
+                continue;
+            }
             if (MatchGelu(nodes, i))
             {
                 _inplaceSource[checked((int)nodes[i + 4].Outputs[0])] = checked((int)nodes[i].Inputs[0]);
                 _fusedSkip[i] = 4;
                 i += 4;
+                continue;
+            }
+            // Conv + channel bias + GELU: the NHWC epilogue applies GELU on the
+            // biased accumulator, so the 7.9 MB activation is written once.
+            if (_nodeNhwc[i] && MatchConvBiasAdd(nodes, i) && MatchGelu(nodes, i + 2) &&
+                nodes[i + 2].Inputs[0] == nodes[i + 1].Outputs[0] &&
+                !HasConsumerAfter(nodes[i + 1].Outputs[0], i + 6))
+            {
+                StretchLastUse(nodes[i].Inputs[0], i + 6);
+                _fusedSkip[i] = 6;
+                i += 6;
                 continue;
             }
             if (MatchConvRelu(nodes, i))
@@ -197,6 +230,63 @@ public sealed class CompiledModel
             !HasConsumerAfter(n1.Outputs[0], i + 2) &&
             !HasConsumerAfter(n2.Outputs[0], i + 3) &&
             !HasConsumerAfter(n3.Outputs[0], i + 4);
+    }
+
+    // ReduceMean(-1) -> Sub -> Pow(2) -> ReduceMean(-1) -> Add(eps) -> Sqrt ->
+    // Div -> Mul(gamma) -> Add(beta), i.e. LayerNorm over the trailing axis.
+    internal bool MatchLayerNorm(NodeRecord[] nodes, int i)
+    {
+        if (i + 8 >= nodes.Length) return false;
+        NodeRecord mean = nodes[i], sub = nodes[i + 1], pow = nodes[i + 2], var = nodes[i + 3], addEps = nodes[i + 4],
+            sqrt = nodes[i + 5], div = nodes[i + 6], mul = nodes[i + 7], addBeta = nodes[i + 8];
+        if (mean.Operator != OperatorId.ReduceMean || sub.Operator != OperatorId.Sub || pow.Operator != OperatorId.Pow ||
+            var.Operator != OperatorId.ReduceMean || addEps.Operator != OperatorId.Add || sqrt.Operator != OperatorId.Sqrt ||
+            div.Operator != OperatorId.Div || mul.Operator != OperatorId.Mul || addBeta.Operator != OperatorId.Add)
+            return false;
+        if (mean.Inputs.Length != 1 || sub.Inputs.Length != 2 || pow.Inputs.Length != 2 || var.Inputs.Length != 1 ||
+            addEps.Inputs.Length != 2 || sqrt.Inputs.Length != 1 || div.Inputs.Length != 2 || mul.Inputs.Length != 2 ||
+            addBeta.Inputs.Length != 2)
+            return false;
+        if (!IsTrailingAxisMean(mean) || !IsTrailingAxisMean(var)) return false;
+        uint x = mean.Inputs[0];
+        if (sub.Inputs[0] != x || sub.Inputs[1] != mean.Outputs[0]) return false;
+        if (pow.Inputs[0] != sub.Outputs[0] || !IsConstantScalar(pow.Inputs[1], 2f)) return false;
+        if (var.Inputs[0] != pow.Outputs[0]) return false;
+        if (!Contains(addEps.Inputs, var.Outputs[0]) || !IsScalarConstant(Other(addEps.Inputs, var.Outputs[0]))) return false;
+        if (sqrt.Inputs[0] != addEps.Outputs[0]) return false;
+        if (div.Inputs[0] != sub.Outputs[0] || div.Inputs[1] != sqrt.Outputs[0]) return false;
+        if (!Contains(mul.Inputs, div.Outputs[0]) || !IsVectorConstant(Other(mul.Inputs, div.Outputs[0]))) return false;
+        if (!Contains(addBeta.Inputs, mul.Outputs[0]) || !IsVectorConstant(Other(addBeta.Inputs, mul.Outputs[0]))) return false;
+        return !HasConsumerAfter(mean.Outputs[0], i + 1) && !HasConsumerAfter(sub.Outputs[0], i + 6) &&
+            !HasConsumerAfter(pow.Outputs[0], i + 3) && !HasConsumerAfter(var.Outputs[0], i + 4) &&
+            !HasConsumerAfter(addEps.Outputs[0], i + 5) && !HasConsumerAfter(sqrt.Outputs[0], i + 6) &&
+            !HasConsumerAfter(div.Outputs[0], i + 7) && !HasConsumerAfter(mul.Outputs[0], i + 8);
+    }
+
+    private bool IsTrailingAxisMean(NodeRecord node)
+    {
+        ReadOnlySpan<byte> p = _model.GetParameters(node);
+        if (p.Length < 16 || U16(p, 2) != 1 || U32(p, 4) == 0) return false;
+        int axis = I32(p, 12);
+        TensorRecord input = _model.Tensors[checked((int)node.Inputs[0])];
+        return axis == -1 || axis == (int)input.Rank - 1;
+    }
+
+    private static uint Other(uint[] inputs, uint value) => inputs[0] == value ? inputs[1] : inputs[0];
+
+    private bool IsScalarConstant(uint tensorIndex)
+    {
+        TensorRecord tensor = _model.Tensors[checked((int)tensorIndex)];
+        if ((tensor.Flags & Model.TensorConstant) == 0) return false;
+        long count = 1;
+        for (int d = 0; d < tensor.Rank; d++) count *= tensor.Dimensions[d];
+        return count == 1;
+    }
+
+    private bool IsVectorConstant(uint tensorIndex)
+    {
+        TensorRecord tensor = _model.Tensors[checked((int)tensorIndex)];
+        return (tensor.Flags & Model.TensorConstant) != 0 && tensor.Rank == 1 && tensor.Dimensions[0] > 1;
     }
 
     private bool MatchConvRelu(NodeRecord[] nodes, int i)
@@ -719,12 +809,15 @@ public sealed class CompiledModel
         public int[] Shape;
         public float[] Data;
         public bool IsConstant;
+        /// <summary>Storage is channels-last (logical <see cref="Shape"/> stays NCHW).</summary>
+        public bool IsNhwc;
         private byte[] _constant;
-        public TensorMeta(DType d, int[] s, ReadOnlySpan<byte> c)
+        public TensorMeta(DType d, int[] s, ReadOnlySpan<byte> c, bool nhwc = false)
         {
             DType = d;
             Shape = s;
             IsConstant = !c.IsEmpty;
+            IsNhwc = nhwc;
             _constant = c.ToArray();
             Data = IsConstant ? System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(_constant.AsSpan()).ToArray() : [];
         }

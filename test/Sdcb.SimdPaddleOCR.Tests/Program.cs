@@ -23,6 +23,8 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
 
 if (args[0] == "--summarize")
     return BenchSummary.Compare(args.Skip(1).ToArray());
+if (args[0] == "--kernel-bench")
+    return KernelBench.Run(args);
 
 int workers = 4;
 string modelType = "tiny";
@@ -75,13 +77,16 @@ inputDir = Path.GetFullPath(inputDir);
 outPath = Path.GetFullPath(outPath);
 cAssetsDir = Path.GetFullPath(cAssetsDir);
 string metadataPath = Path.Combine(inputDir, "metadata.json");
-if (!File.Exists(metadataPath))
-    throw new FileNotFoundException($"dataset metadata not found: {metadataPath}");
+bool hasMetadata = File.Exists(metadataPath);
 
-string[] files = Directory.GetFiles(inputDir, "img-*.jpg")
+// The synthetic dataset carries metadata.json and exactly 100 img-*.jpg files;
+// any other folder of JPEGs is benchmarked without accuracy scoring.
+string[] files = (hasMetadata ? Directory.GetFiles(inputDir, "img-*.jpg") : Directory.GetFiles(inputDir, "*.jpg"))
     .OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
-if (files.Length != 100)
+if (hasMetadata && files.Length != 100)
     throw new InvalidOperationException($"expected 100 JPG files, got {files.Length}");
+if (files.Length == 0)
+    throw new InvalidOperationException($"no JPG files found in {inputDir}");
 if (count is { } limit)
     files = files.Take(limit).ToArray();
 
@@ -188,8 +193,9 @@ meta["libraryTfm"] = typeof(PaddleOcrAll).Assembly
     .GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName;
 
 JsonObject doc = BenchSummary.WrapWithMeta(rows, meta);
-BenchmarkAccuracy? accuracy = BenchSummary.ComputeAccuracy(
-    doc["rows"]!.AsArray(), metadataPath);
+BenchmarkAccuracy? accuracy = hasMetadata
+    ? BenchSummary.ComputeAccuracy(doc["rows"]!.AsArray(), metadataPath)
+    : null;
 if (accuracy is not null)
     meta["accuracy"] = BenchSummary.AccuracyNode(accuracy);
 
@@ -200,7 +206,7 @@ File.WriteAllText(outPath, doc.ToJsonString(new JsonSerializerOptions
     Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
 }));
 Console.WriteLine($"saved: {outPath}");
-BenchSummary.Print(BenchSummary.Parse(outPath, null, metadataPath));
+BenchSummary.Print(BenchSummary.Parse(outPath, null, hasMetadata ? metadataPath : null));
 return 0;
 
 static string EffectiveIsa()

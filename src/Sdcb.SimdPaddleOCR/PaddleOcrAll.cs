@@ -231,14 +231,37 @@ public sealed class PaddleOcrAll : IDisposable
             }
             else
             {
-                // Stride partition: crop sizes vary widely, so interleaving line
-                // indices across workers balances load better than contiguous
-                // ranges. Each worker touches a disjoint set of lines, so the
-                // shared (read-only here) crop workspace and the result array
-                // need no synchronization.
-                Parallel.For(0, workerCount, worker =>
-                    ProcessRange(worker, count, workerCount, worker, cropBuffer, cropOffsets,
-                        cropBytes, cropWidths, cropHeights, detection.Boxes, lines));
+                // Longest-processing-time first with a shared cursor: REC cost
+                // grows with the resized line width, so handing out the widest
+                // crops first and letting idle workers pull the next line keeps
+                // the tail (where fewer than workerCount lines remain) short.
+                int[] order = PooledArrays.Rent<int>(count);
+                try
+                {
+                    for (int i = 0; i < count; i++) order[i] = i;
+                    int[] cost = cropWidths, denominator = cropHeights;
+                    Array.Sort(order, 0, count, Comparer<int>.Create((a, b) =>
+                    {
+                        long costA = (long)cost[a] * Math.Max(1, denominator[b]);
+                        long costB = (long)cost[b] * Math.Max(1, denominator[a]);
+                        int byCost = costB.CompareTo(costA);
+                        return byCost != 0 ? byCost : a.CompareTo(b);
+                    }));
+                    int cursor = -1;
+                    Parallel.For(0, workerCount, _ =>
+                    {
+                        PaddleOcrClassifier? classifier = _classifier;
+                        PaddleOcrRecognizer recognizer = _recognizer;
+                        int next;
+                        while ((next = Interlocked.Increment(ref cursor)) < count)
+                            ProcessOne(order[next], classifier, recognizer, cropBuffer, cropOffsets, cropBytes,
+                                cropWidths, cropHeights, detection.Boxes, lines);
+                    });
+                }
+                finally
+                {
+                    PooledArrays.Return(order);
+                }
             }
             if (pipelineProfile) PipelineProfiler.Add(PipelineProfiler.LinesWall, pipelineStarted);
             if (s_profileEnabled) AddProfile(2, stageStart);
@@ -470,6 +493,11 @@ public sealed class PaddleOcrAll : IDisposable
     private static int ResolveDetectorIntraThreads(PaddleOcrOptions options)
     {
         if (options.DetIntraOpThreads > 0) return Math.Min(options.DetIntraOpThreads, 16);
+        if (int.TryParse(Environment.GetEnvironmentVariable("PPOCR_DET_THREADS"), out int env) && env > 0)
+            return Math.Min(env, 16);
+        // The channels-last kernels are FMA-bound, so SMT siblings add
+        // throughput (det 16 vs 8 threads measured ~8-25% faster on Zen 3).
+        if (OnnxSharp.LayoutPlanner.IsEnabled) return Math.Min(16, Environment.ProcessorCount);
         return Math.Min(8, Environment.ProcessorCount);
     }
 
