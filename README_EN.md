@@ -160,6 +160,16 @@ Clear this option, then restart the debugging session:
 - Rider: `Build, Execution, Deployment > Debugger > JIT` > clear `Disable JIT optimization on module load`.
 - VS Code: open `Settings (JSON)` and add `"csharp.debug.suppressJITOptimizations": false`.
 
+### Why is Native AOT much slower than JIT?
+
+When publishing Native AOT on x64, the executable project **must** set:
+
+```xml
+<IlcInstructionSet>avx2</IlcInstructionSet>
+```
+
+Without it, ILC targets the SSE2 / 128-bit `Vector<T>` baseline, `Avx2.IsSupported` is folded to `false`, the AVX2 kernels are stripped, and inference is much slower. Do not set this on CPUs without AVX2. ARM64 AOT already includes NEON / `AdvSimd` in the baseline, so you usually do not need `IlcInstructionSet`.
+
 ## Support
 
 | | Notes |

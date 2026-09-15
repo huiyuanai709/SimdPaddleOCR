@@ -160,6 +160,16 @@ Web 示例打开站点即可上传；API 为 `POST /api/ocr`（`multipart/form-d
 - Rider：`构建、执行、部署 > 调试器 > JIT`，取消勾选`在加载模块时禁用 JIT 优化`。
 - VS Code：打开`设置 (JSON)`，添加 `"csharp.debug.suppressJITOptimizations": false`。
 
+### Native AOT 发布后为什么比 JIT 慢很多？
+
+x64 发布 Native AOT 时，可执行项目里**必须**设置：
+
+```xml
+<IlcInstructionSet>avx2</IlcInstructionSet>
+```
+
+不设的话，ILC 按 SSE2 / 128-bit `Vector<T>` 基线编译，`Avx2.IsSupported` 会被折成 `false`，AVX2 内核整段裁掉，推理会慢一截。没有 AVX2 的 CPU 不要设这项。ARM64 的 AOT 基线已带 NEON / `AdvSimd`，一般不用写 `IlcInstructionSet`。
+
 ## 支持范围
 
 | | 说明 |
