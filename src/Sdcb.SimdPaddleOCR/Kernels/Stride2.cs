@@ -25,6 +25,39 @@ internal static partial class Stride2
         // output slice and therefore preserves the scalar accumulation order.
         int tile = (outputChannels & 7) == 0 ? 8 : (outputChannels & 3) == 0 ? 4 : 1;
         long work = checked((long)outputChannels * inputChannels * plane * 4);
+#if !NETSTANDARD2_0
+        // A single 8-output-channel block leaves the channel shard below with
+        // exactly one worker, so the detector's 2x2 stride-1 projections ran
+        // single-threaded while the rest of the intra-op budget idled.  Output
+        // row y reads only input rows y and y+1, so splitting output rows
+        // reproduces the whole-plane result bit for bit.
+        if (Avx.IsSupported && outputChannels == 8 && intraOpThreads > 1 && batch == 1 &&
+            work >= 4_000_000 && height >= intraOpThreads * 2)
+        {
+            fixed (float* inputPtr = input, weightsPtr = weights,
+                biasPtr = bias, outputPtr = output)
+            {
+                nint inputAddress = (nint)inputPtr, weightsAddress = (nint)weightsPtr,
+                    biasAddress = (nint)biasPtr, outputAddress = (nint)outputPtr;
+                int inputLength = input.Length, weightsLength = weights.Length,
+                    biasLength = bias.Length, outputLength = output.Length;
+                Parallel.For(0, intraOpThreads, worker =>
+                {
+                    int yBegin = height * worker / intraOpThreads;
+                    int yEnd = height * (worker + 1) / intraOpThreads;
+                    if (yEnd <= yBegin) return;
+                    ReadOnlySpan<float> inSpan = new((void*)inputAddress, inputLength);
+                    ReadOnlySpan<float> wSpan = new ReadOnlySpan<float>((void*)weightsAddress, weightsLength);
+                    ReadOnlySpan<float> bSpan = biasLength == 0 ? []
+                        : new ReadOnlySpan<float>((void*)biasAddress, biasLength);
+                    Span<float> outSpan = new Span<float>((void*)outputAddress, outputLength);
+                    Conv2x2PadEndEightOutputsUnsafe(inSpan, wSpan, bSpan, outSpan, 1,
+                        inputChannels, height, width, outputChannels, yBegin, yEnd);
+                });
+            }
+            return true;
+        }
+#endif
         if (tile > 1 && intraOpThreads > 1 && batch == 1 && work >= 4_000_000)
         {
             int blocks = outputChannels / tile;

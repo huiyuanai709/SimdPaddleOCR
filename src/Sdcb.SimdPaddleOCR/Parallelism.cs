@@ -27,6 +27,23 @@ internal static class Parallelism
         return MathCompat.Clamp(Math.Min(requested, cpu), 1, MaxLineWorkers);
     }
 
+    public const int MaxAutoCropWorkers = 16;
+
+    // The perspective crop runs in an exclusive window between DET and the
+    // line stage, so it can use cores the line workers will claim later —
+    // the same reasoning behind ResolveDetectorIntraThreads. It still never
+    // takes fewer than the line workers, so a machine that asked for more
+    // parallelism is not silently capped here.
+    public static int ResolveCropWorkers(int lineWorkerCount) =>
+        ResolveCropWorkers(lineWorkerCount, Environment.ProcessorCount);
+
+    public static int ResolveCropWorkers(int lineWorkerCount, int processorCount)
+    {
+        int cpu = Math.Max(1, processorCount);
+        int lines = ResolveLineWorkers(lineWorkerCount, cpu);
+        return MathCompat.Clamp(Math.Max(lines, Math.Min(cpu, MaxAutoCropWorkers)), 1, MaxAutoCropWorkers);
+    }
+
     public static int ResolveRecognizerIntraOp(int lineWorkers) =>
         ResolveRecognizerIntraOp(lineWorkers, Environment.ProcessorCount);
 

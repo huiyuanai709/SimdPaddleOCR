@@ -14,8 +14,10 @@ internal static partial class Stride2
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void Conv2x2PadEndEightOutputsUnsafe(ReadOnlySpan<float> input,
         ReadOnlySpan<float> weights, ReadOnlySpan<float> bias, Span<float> output, int batch,
-        int inputChannels, int height, int width, int outputChannels)
+        int inputChannels, int height, int width, int outputChannels,
+        int yBegin = 0, int yEnd = -1)
     {
+        if (yEnd < 0) yEnd = height;
         int plane = checked(height * width), weightsPerOutput = checked(inputChannels * 4);
         fixed (float* inputPtr = input, weightsPtr = weights, biasPtr = bias, outputPtr = output)
         {
@@ -39,7 +41,7 @@ internal static partial class Stride2
                     float b6 = biasPtr == null ? 0f : biasPtr[co + 6];
                     float b7 = biasPtr == null ? 0f : biasPtr[co + 7];
                     float* batchInput = inputPtr + b * inputChannels * plane;
-                    for (int y = 0; y < height; y++)
+                    for (int y = yBegin; y < yEnd; y++)
                     {
                         int row = y * width, x = 0;
                         for (; x <= width - 9; x += 8)

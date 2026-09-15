@@ -223,17 +223,32 @@ public sealed partial class InferenceSession : IDisposable
             assigned[index] = true;
             planned[index] = true;
         }
+        // Bucket tensors by the node at which they become releasable: a
+        // tensor is freed when we reach the node right after its last
+        // consumer, i.e. exactly when the previous per-node scan condition
+        // `!HasConsumerAfter(i, ni - 1)` first became true. Graph outputs
+        // carry _lastUse == nodeCount, so their bucket index falls out of
+        // range and they are never released — same effect as the removed
+        // IsGraphOutput guard. Replaces an O(nodes x tensors) scan (DET:
+        // 245 x 411) that ran on every reshape, i.e. on every image.
+        int[] releaseHead = new int[nodeCount + 1];
+        int[] releaseNext = new int[tensorCount];
+        ArrayCompat.Fill(releaseHead, -1);
+        for (int i = 0; i < tensorCount; i++)
+        {
+            if (_tensors[i].IsConstant || lengths[i] == 0) continue;
+            int at = _compiled.LastUse(i) + 1;
+            if ((uint)at >= (uint)releaseHead.Length) continue;
+            releaseNext[i] = releaseHead[at];
+            releaseHead[at] = i;
+        }
         for (int ni = 0; ni < nodeCount; ni++)
         {
-            for (int i = 0; i < tensorCount; i++)
+            for (int i = releaseHead[ni]; i >= 0; i = releaseNext[i])
             {
-                if (assigned[i] && lengths[i] != 0 &&
-                    !_compiled.HasConsumerAfter((uint)i, ni - 1) &&
-                    !_compiled.IsGraphOutput(i))
-                {
-                    assigned[i] = false;
-                    Release(i);
-                }
+                if (!assigned[i]) continue;
+                assigned[i] = false;
+                Release(i);
             }
             foreach (uint output in _model.Nodes[ni].Outputs)
             {
@@ -852,7 +867,6 @@ public sealed partial class InferenceSession : IDisposable
         if (activation != NhwcActivation.None)
             throw new InvalidOperationException("Fused activation is only available on the NHWC path.");
         float[]? packed = _model.GetPackedWeights(conv, Model.PackConv1x1);
-        float[]? packedOc16 = _model.GetPackedWeights(conv, Model.PackConv1x1Oc16);
         float[]? packedOc8 = _model.GetPackedWeights(conv, Model.PackConv1x1Oc8);
         float[]? packed3x3 = _model.GetPackedWeights(conv, Model.PackConv3x3);
         float[]? packedDense8 = _model.GetPackedWeights(conv, Model.PackConvDense8);
@@ -864,7 +878,8 @@ public sealed partial class InferenceSession : IDisposable
             ? _model.GetPackedConv1x1Int8(conv)
             : null;
         Conv(x, _tensors[conv.Inputs[1]], bias, p, output, _intraOpThreads,
-            packed, packed3x3, packedOc16, packedInt8, packedOc8, residual, packedDense8, packedDepthwise9);
+            packed, packed3x3, packedInt8, packedOc8, residual, packedDense8, packedDepthwise9,
+            _model, conv);
     }
 
     private bool TryExecuteConvBiasAdd(int index)
@@ -1265,9 +1280,10 @@ public sealed partial class InferenceSession : IDisposable
     }
 
     private static void Conv(TensorValue x, TensorValue w, TensorValue? bias, ReadOnlySpan<byte> p,
-        TensorValue o, int intraOpThreads = 1, float[]? packedWeights = null, float[]? packed3x3 = null,
-        float[]? packedOc16 = null, PackedConv1x1Int8? packedInt8 = null, float[]? packedOc8 = null,
-        ReadOnlySpan<float> residual = default, float[]? packedDense8 = null, float[]? packedDepthwise9 = null)
+        TensorValue o, int intraOpThreads, float[]? packedWeights, float[]? packed3x3,
+        PackedConv1x1Int8? packedInt8, float[]? packedOc8,
+        ReadOnlySpan<float> residual, float[]? packedDense8, float[]? packedDepthwise9,
+        Model model, in NodeRecord node)
     {
         int[] id = x.Shape; int[] wd = w.Shape; int[] od = o.Shape; int group = checked((int)U32(p, 4)), kh = I32(p, 8), kw = I32(p, 12), sh = I32(p, 16), sw = I32(p, 20), dh = I32(p, 24), dw = I32(p, 28), pt = I32(p, 32), pl = I32(p, 36); int n = id[0], cin = id[1], h = id[2], wi = id[3], cout = od[1], oh = od[2], ow = od[3], cpg = cin / group, opg = cout / group;
         ReadOnlySpan<float> biasData = bias is null ? [] : bias.Data;
@@ -1288,9 +1304,18 @@ public sealed partial class InferenceSession : IDisposable
         if (group == 1 && sh == 1 && sw == 1 && dh == 1 && dw == 1 && packedDense8 is not null &&
             ConvDenseStride1.Try(x.Data, packedDense8, w.Data, biasData, o.Data, n, cin, h, wi,
                 cout, oh, ow, kh, kw, pt, pl, intraOpThreads)) return;
+        // Pack OC-major on demand. TryOcMajor only serves small output planes
+        // (plane < 48), while PackConv1x1Oc16 is a full ~55 MB weight copy on
+        // medium. The previous version built it unconditionally and the kernel
+        // then rejected it -- created only to be discarded, and retained forever
+        // by the packed-weight cache. Hoisting the kernel's own documented
+        // preconditions ahead of the fetch is behaviourally equivalent: when they
+        // fail, the kernel returned false anyway.
+        bool ocMajorEligible = (cout & 15) == 0 && cout >= 16 && (long)h * wi < 48;
         if (kh == 1 && kw == 1 && sh == 1 && sw == 1 && dh == 1 && dw == 1 &&
             pt == 0 && pl == 0 && I32(p, 40) == 0 && I32(p, 44) == 0 &&
-            packedOc16 is not null && group == 1 &&
+            ocMajorEligible && group == 1 &&
+            model.GetPackedWeights(node, Model.PackConv1x1Oc16) is { } packedOc16 &&
             Conv1x1.TryOcMajor(x.Data, packedOc16, biasData, o.Data,
                 n, cin, h, wi, cout, intraOpThreads)) return;
         if (kh == 1 && kw == 1 && sh == 1 && sw == 1 && dh == 1 && dw == 1 &&

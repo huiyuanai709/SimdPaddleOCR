@@ -111,6 +111,9 @@ public sealed class CompiledModel
 
     internal TensorMeta GetTensor(int index) => _tensors[index];
     internal NodeRecord GetNode(int index) => _model.Nodes[index];
+    /// <summary>Node index of the last consumer, or -1 when unconsumed; graph outputs carry the node count.</summary>
+    internal int LastUse(int tensorIndex) => _lastUse[tensorIndex];
+
     internal bool HasConsumerAfter(uint tensorIndex, int nodeIndex)
         => _lastUse[checked((int)tensorIndex)] > nodeIndex;
     internal bool IsGraphOutput(int tensorIndex) => _model.GraphOutputs.Contains((uint)tensorIndex);
@@ -818,8 +821,20 @@ public sealed class CompiledModel
             Shape = s;
             IsConstant = !c.IsEmpty;
             IsNhwc = nhwc;
-            _constant = c.ToArray();
-            Data = IsConstant ? System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(_constant.AsSpan()).ToArray() : [];
+            if (!IsConstant)
+            {
+                _constant = [];
+                Data = [];
+                return;
+            }
+            Data = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(c).ToArray();
+            // F32 tensors: once Data (the float[] the kernels actually consume)
+            // exists, _constant has no remaining reader -- GetIntegerValues only
+            // serves I64/I32 and returns empty for F32. The previous version kept
+            // the raw bytes unconditionally, storing every weight twice, and
+            // CompiledModel is created per input shape (the session cache holds up
+            // to 32), so that duplication multiplied.
+            _constant = d == DType.F32 ? [] : c.ToArray();
         }
         public void Dispose()
         {

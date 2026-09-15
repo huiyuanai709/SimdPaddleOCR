@@ -27,6 +27,7 @@ public sealed class PaddleOcrAll : IDisposable
     private readonly PaddleOcrRecognizer _recognizer;
     private readonly PaddleOcrOptions _options;
     private readonly int _lineWorkers;
+    private readonly int _cropWorkers;
     private readonly List<byte[]> _cropBuffers = [];
     private readonly object _cropLock = new();
     private bool _disposed;
@@ -112,6 +113,7 @@ public sealed class PaddleOcrAll : IDisposable
         if (_options.UseDirectionClassification && classifierModel is null)
             throw new ArgumentNullException(nameof(classifierModel));
         _lineWorkers = Parallelism.ResolveLineWorkers(_options.LineWorkerCount);
+        _cropWorkers = Parallelism.ResolveCropWorkers(_options.LineWorkerCount);
         _detector = new PaddleOcrDetector(detectorModel ?? throw new ArgumentNullException(nameof(detectorModel)), _options.Detector,
             ResolveDetectorIntraThreads(_options));
         _classifier = classifierModel is null ? null : new PaddleOcrClassifier(classifierModel, _options.Classifier);
@@ -177,10 +179,14 @@ public sealed class PaddleOcrAll : IDisposable
             cropBuffer = RentCropBuffer(checked((int)cropTotal));
             if (pipelineProfile) PipelineProfiler.Add(PipelineProfiler.CropSetup, pipelineStarted);
             pipelineStarted = pipelineProfile ? PipelineProfiler.Now() : 0;
-            // Crops write disjoint buffer ranges, so they parallelize freely
-            // across the same budget as the line stage below.
+            // Crops write disjoint buffer ranges, so they parallelize freely.
+            // This is an exclusive window before any line worker starts, so it
+            // gets its own budget the same way DET does; reusing
+            // LineWorkerCount here capped the crop at 4 threads on a 16-core
+            // machine and left the phase latency-bound.
             int lineWorkerCount = Math.Min(_lineWorkers, count);
-            if (lineWorkerCount <= 1)
+            int cropWorkers = Math.Min(Math.Max(lineWorkerCount, _cropWorkers), count);
+            if (cropWorkers <= 1)
             {
                 for (int i = 0; i < count; i++)
                 {
@@ -191,20 +197,48 @@ public sealed class PaddleOcrAll : IDisposable
             }
             else
             {
-                unsafe
+                // Flatten (line, row band) into one work list. Splitting only by
+                // line leaves most workers idle whenever there are fewer lines
+                // than workers, which is the common case (a dozen lines, sixteen
+                // workers); the phase then costs as much as its largest single
+                // crop. Rows within a crop write disjoint destination ranges, so
+                // bands are independent and the per-row arithmetic is unchanged.
+                List<(int Line, int Begin, int End)> bands = [];
+                for (int i = 0; i < count; i++)
                 {
-                    fixed (byte* sourcePtr = source)
+                    int rows = PPOCRCrop.UnrotatedHeight(detection.Boxes[i]);
+                    for (int y = 0; y < rows; y += CropRowsPerBand)
+                        bands.Add((i, y, Math.Min(rows, y + CropRowsPerBand)));
+                }
+                int cropJobs = Math.Min(cropWorkers, bands.Count);
+                if (cropJobs <= 1)
+                {
+                    for (int i = 0; i < count; i++)
                     {
-                        nint sourceAddress = (nint)sourcePtr;
-                        int sourceLength = source.Length;
-                        byte[] cropTarget = cropBuffer;
-                        int[] offsets = cropOffsets, bytes = cropBytes, widths = cropWidths,
-                            heights = cropHeights;
-                        PaddleOcrDetectionBox[] boxes = detection.Boxes;
-                        Parallel.For(0, lineWorkerCount, worker =>
-                            CropRange(worker, count, lineWorkerCount, sourceAddress, sourceLength,
-                                sourceWidth, sourceHeight, sourceStride, boxes, cropTarget,
-                                offsets, bytes, widths, heights));
+                        PPOCRCrop.ExtractInto(source, sourceWidth, sourceHeight, sourceStride,
+                            detection.Boxes[i], cropBuffer.AsSpan(cropOffsets[i], cropBytes[i]),
+                            out cropWidths[i], out cropHeights[i]);
+                    }
+                }
+                else
+                {
+                    unsafe
+                    {
+                        fixed (byte* sourcePtr = source)
+                        {
+                            nint sourceAddress = (nint)sourcePtr;
+                            int sourceLength = source.Length;
+                            byte[] cropTarget = cropBuffer;
+                            int[] offsets = cropOffsets, bytes = cropBytes, widths = cropWidths,
+                                heights = cropHeights;
+                            int workers = cropJobs;
+                            PaddleOcrDetectionBox[] boxes = detection.Boxes;
+                            List<(int Line, int Begin, int End)> jobs = bands;
+                            Parallel.For(0, workers, worker =>
+                                CropBands(worker, workers, sourceAddress, sourceLength,
+                                    sourceWidth, sourceHeight, sourceStride, boxes, cropTarget,
+                                    offsets, bytes, widths, heights, jobs));
+                        }
                     }
                 }
             }
@@ -426,15 +460,28 @@ public sealed class PaddleOcrAll : IDisposable
         }
     }
 
-    private static unsafe void CropRange(int first, int count, int stride, nint sourceAddress,
-        int sourceLength, int sourceWidth, int sourceHeight, int sourceStride,
-        PaddleOcrDetectionBox[] boxes, byte[] cropBuffer, int[] offsets, int[] bytes, int[] widths,
-        int[] heights)
+    // Rows per crop band. Large enough that per-band setup (perspective solve,
+    // source validation) stays negligible against the row work it covers.
+    private const int CropRowsPerBand = 16;
+
+    private static unsafe void CropBands(int first, int workers, nint sourceAddress, int sourceLength,
+        int sourceWidth, int sourceHeight, int sourceStride, PaddleOcrDetectionBox[] boxes,
+        byte[] cropBuffer, int[] offsets, int[] bytes, int[] widths, int[] heights,
+        List<(int Line, int Begin, int End)> jobs)
     {
         ReadOnlySpan<byte> source = new((void*)sourceAddress, sourceLength);
-        for (int i = first; i < count; i += stride)
-            PPOCRCrop.ExtractInto(source, sourceWidth, sourceHeight, sourceStride,
-                boxes[i], cropBuffer.AsSpan(offsets[i], bytes[i]), out widths[i], out heights[i]);
+        for (int job = first; job < jobs.Count; job += workers)
+        {
+            (int line, int begin, int end) = jobs[job];
+            PPOCRCrop.ExtractRangeInto(source, sourceWidth, sourceHeight, sourceStride,
+                boxes[line], cropBuffer.AsSpan(offsets[line], bytes[line]), begin, end);
+            if (begin == 0)
+            {
+                (int width, int height, _) = PPOCRCrop.GetSize(boxes[line]);
+                widths[line] = width;
+                heights[line] = height;
+            }
+        }
     }
 
     private void ProcessRange(int first, int count, int stride, int worker, byte[] cropBuffer,
