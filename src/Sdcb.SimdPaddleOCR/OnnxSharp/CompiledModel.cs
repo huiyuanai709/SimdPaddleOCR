@@ -831,9 +831,9 @@ public sealed class CompiledModel
             // F32 tensors: once Data (the float[] the kernels actually consume)
             // exists, _constant has no remaining reader -- GetIntegerValues only
             // serves I64/I32 and returns empty for F32. The previous version kept
-            // the raw bytes unconditionally, storing every weight twice, and
-            // CompiledModel is created per input shape (the session cache holds up
-            // to 32), so that duplication multiplied.
+            // the raw bytes unconditionally, storing every weight twice. This
+            // CompiledModel is shared across input shapes, so the saving is one
+            // copy of the F32 ONNX constants, not one copy per cached session.
             _constant = d == DType.F32 ? [] : c.ToArray();
         }
         public void Dispose()

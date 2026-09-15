@@ -197,11 +197,11 @@ public sealed class PaddleOcrAll : IDisposable
             }
             else
             {
-                // Flatten (line, row band) into one work list. Splitting only by
-                // line leaves most workers idle whenever there are fewer lines
-                // than workers, which is the common case (a dozen lines, sixteen
-                // workers); the phase then costs as much as its largest single
-                // crop. Rows within a crop write disjoint destination ranges, so
+                // Flatten (line, row band) into one work list. cropWorkers is
+                // still min'd with `count` above, so a 12-line page on 16 cores
+                // uses 12 workers, not 16. The 2D split still helps: bands of
+                // one tall crop go to different workers and cut the slowest-line
+                // tail. Rows within a crop write disjoint destination ranges, so
                 // bands are independent and the per-row arithmetic is unchanged.
                 List<(int Line, int Begin, int End)> bands = [];
                 for (int i = 0; i < count; i++)
