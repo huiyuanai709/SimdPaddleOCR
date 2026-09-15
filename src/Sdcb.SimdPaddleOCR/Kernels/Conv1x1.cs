@@ -377,7 +377,13 @@ internal static partial class Conv1x1
             }
             return true;
         }
-        if (AvxVnni.IsSupported && packedInt8 is not null &&
+        // residual.IsEmpty is required, not cosmetic: the VNNI kernel has no
+        // residual parameter, so letting it win this branch would silently drop
+        // the residual that FusesResidualInPackedEight promised to fuse. Today
+        // the caller keeps packedInt8 null (InferenceSession enables Int8 VNNI
+        // behind a const false), so this is a latent contract mismatch rather
+        // than a live bug — but it is exactly the shape that turns into one.
+        if (residual.IsEmpty && AvxVnni.IsSupported && packedInt8 is not null &&
             inputChannels >= 192 && (inputChannels & 3) == 0 && (outputChannels & 7) == 0 &&
             packedInt8.Weights.Length == checked(inputChannels * outputChannels) &&
             packedInt8.Scales.Length == outputChannels && packedInt8.Sums.Length == outputChannels &&
