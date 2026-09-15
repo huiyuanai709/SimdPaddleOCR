@@ -51,8 +51,43 @@ internal static class PPOCRCrop
             outputWidth, outputHeight);
     }
 
+    /// <summary>
+    /// Height of the unrotated sampling grid, i.e. how many rows
+    /// <see cref="ExtractRangeInto"/> can split the crop into.
+    /// </summary>
+    public static int UnrotatedHeight(in PaddleOcrDetectionBox box)
+        => TryComputePerspective(box, out PerspectiveTransform transform)
+            ? transform.UnrotatedHeight
+            : throw new InvalidDataException("Invalid detection quadrilateral.");
+
+    /// <summary>
+    /// Extracts rows [<paramref name="yBegin"/>, <paramref name="yEnd"/>) of the same
+    /// perspective crop. Each sampled row writes a disjoint destination range, so
+    /// bands can run on different workers; the per-row arithmetic is untouched.
+    /// </summary>
+    public static void ExtractRangeInto(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, in PaddleOcrDetectionBox box, Span<byte> destination,
+        int yBegin, int yEnd)
+    {
+        ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
+        if (!TryComputePerspective(box, out PerspectiveTransform transform))
+            throw new InvalidDataException("Invalid detection quadrilateral.");
+        int outputWidth = transform.RotateVertical ? transform.UnrotatedHeight : transform.UnrotatedWidth;
+        int outputHeight = transform.RotateVertical ? transform.UnrotatedWidth : transform.UnrotatedHeight;
+        if (destination.Length < checked(outputWidth * outputHeight * 3))
+            throw new ArgumentException("Destination buffer is too small.", nameof(destination));
+        ExtractCore(source, sourceWidth, sourceHeight, sourceStride, box, destination,
+            outputWidth, outputHeight, yBegin, yEnd);
+    }
+
     private static unsafe void ExtractCore(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, in PaddleOcrDetectionBox box, Span<byte> crop, int outputWidth, int outputHeight)
+        => ExtractCore(source, sourceWidth, sourceHeight, sourceStride, box, crop, outputWidth, outputHeight,
+            0, int.MaxValue);
+
+    private static unsafe void ExtractCore(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, in PaddleOcrDetectionBox box, Span<byte> crop, int outputWidth, int outputHeight,
+        int yBegin, int yEnd)
     {
         if (!TryComputePerspective(box, out PerspectiveTransform transform))
             throw new InvalidDataException("Invalid perspective transform.");
@@ -64,7 +99,7 @@ internal static class PPOCRCrop
         fixed (byte* sourcePtr = source)
         fixed (byte* cropPtr = crop)
         {
-            for (int y = 0; y < unrotatedHeight; y++)
+            for (int y = yBegin; y < Math.Min(yEnd, unrotatedHeight); y++)
             {
                 double v = (double)y / unrotatedHeight;
                 int x = 0;
