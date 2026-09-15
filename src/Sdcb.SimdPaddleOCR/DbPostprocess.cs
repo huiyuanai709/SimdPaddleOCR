@@ -1,4 +1,8 @@
 using System.Buffers;
+#if !NETSTANDARD2_0
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
+#endif
 
 using Sdcb.SimdPaddleOCR.OnnxSharp;
 using Sdcb.SimdPaddleOCR.Kernels;
@@ -34,6 +38,7 @@ internal static class DbPostprocess
         if (options.UseDilation) Dilate2x2(bitmap, scratch.Dilated, mapWidth, mapHeight, pixels);
         Array.Clear(visited, 0, pixels);
         Array.Clear(backgroundVisited, 0, pixels);
+        byte[]? interior = ComputeInterior(bitmap, scratch.Interior, mapWidth, mapHeight, pixels);
         List<PaddleOcrDetectionBox> found = [with(Math.Min(options.MaxCandidates, 256))];
         Span<Point> corners = stackalloc Point[4];
         Span<Point> miniBoxScratch = stackalloc Point[4];
@@ -44,7 +49,7 @@ internal static class DbPostprocess
         {
             if (bitmap[start] == 0 || visited[start] != 0) continue;
             int boundaryCount = FillForeground(start, bitmap, visited, queue,
-                boundaryScratch, mapWidth, mapHeight);
+                boundaryScratch, mapWidth, mapHeight, interior);
             if (boundaryCount < 3) continue;
             candidateCount++;
             if (TryBuildDetection(boundaryScratch, boundaryCount, prediction,
@@ -105,6 +110,7 @@ internal static class DbPostprocess
         public byte[] Visited = [];
         public byte[] BackgroundVisited = [];
         public byte[] Dilated = [];
+        public byte[] Interior = [];
         public int[] Queue = [];
         public Point[] Boundary = [];
         public Point[] Hull = [];
@@ -116,6 +122,7 @@ internal static class DbPostprocess
             if (Visited.Length < pixels) Visited = new byte[pixels];
             if (BackgroundVisited.Length < pixels) BackgroundVisited = new byte[pixels];
             if (Dilated.Length < pixels) Dilated = new byte[pixels];
+            if (Interior.Length < pixels) Interior = new byte[pixels];
             int queue = checked(3 * (pixels / 2 + 2));
             if (Queue.Length < queue) Queue = new int[queue];
             if (Boundary.Length < pixels) Boundary = new Point[pixels];
@@ -129,7 +136,7 @@ internal static class DbPostprocess
     // as the previous per-pixel BFS (each boundary pixel emitted exactly once;
     // the convex hull consumer is order-insensitive).
     private static int FillForeground(int start, byte[] bitmap, byte[] visited, int[] stack,
-        Point[] boundary, int mapWidth, int mapHeight)
+        Point[] boundary, int mapWidth, int mapHeight, byte[]? interior)
     {
         int boundaryCount = 0, top = 0;
         int seedY = start / mapWidth, seedX = start % mapWidth, seedRow = seedY * mapWidth;
@@ -141,9 +148,21 @@ internal static class DbPostprocess
         while (top > 0)
         {
             int right = stack[--top], left = stack[--top], y = stack[--top];
-            for (int x = left; x <= right; x++)
-                if (IsBoundary(bitmap, mapWidth, mapHeight, x, y) && boundaryCount < boundary.Length)
-                    boundary[boundaryCount++] = new Point(x, y);
+            // `interior` is the 3x3 erosion of the bitmap, i.e. exactly what
+            // IsBoundary recomputes per pixel with eight scattered reads.
+            int boundaryRow = y * mapWidth;
+            if (interior is not null)
+            {
+                for (int x = left; x <= right; x++)
+                    if (interior[boundaryRow + x] == 0 && boundaryCount < boundary.Length)
+                        boundary[boundaryCount++] = new Point(x, y);
+            }
+            else
+            {
+                for (int x = left; x <= right; x++)
+                    if (IsBoundary(bitmap, mapWidth, mapHeight, x, y) && boundaryCount < boundary.Length)
+                        boundary[boundaryCount++] = new Point(x, y);
+            }
             int scanFrom = Math.Max(0, left - 1), scanTo = Math.Min(mapWidth - 1, right + 1);
             for (int direction = -1; direction <= 1; direction += 2)
             {
@@ -285,6 +304,52 @@ internal static class DbPostprocess
                 dilated[dst] = 1;
         }
         Buffer.BlockCopy(dilated, 0, bitmap, 0, pixels);
+    }
+
+    // 3x3 erosion of the foreground: interior[p] is non-zero only when all
+    // eight neighbours of p are foreground.  That is precisely the predicate
+    // IsBoundary evaluates one pixel at a time with eight scattered byte
+    // reads; the detector's postprocess spends most of its time there.  One
+    // vectorised pass replaces those reads with a single sequential read per
+    // pixel, and the byte values (0/1) let the AND result be stored directly.
+    private static unsafe byte[]? ComputeInterior(byte[] bitmap, byte[] interior, int width, int height, int pixels)
+    {
+        #if !NETSTANDARD2_0
+        if (!Avx2.IsSupported || width < 3 || height < 3) return null;
+        Array.Clear(interior, 0, pixels);
+        fixed (byte* b = bitmap)
+        fixed (byte* d = interior)
+        {
+            for (int y = 1; y + 1 < height; y++)
+            {
+                int row = y * width;
+                byte* prev = b + row - width, cur = b + row, next = b + row + width;
+                byte* dst = d + row;
+                int x = 1;
+                for (; x <= width - 33; x += 32)
+                {
+                    Vector256<byte> up = Avx2.And(
+                        Avx2.And(Avx2.LoadVector256(prev + x - 1), Avx2.LoadVector256(prev + x)),
+                        Avx2.LoadVector256(prev + x + 1));
+                    Vector256<byte> side = Avx2.And(
+                        Avx2.LoadVector256(cur + x - 1), Avx2.LoadVector256(cur + x + 1));
+                    Vector256<byte> down = Avx2.And(
+                        Avx2.And(Avx2.LoadVector256(next + x - 1), Avx2.LoadVector256(next + x)),
+                        Avx2.LoadVector256(next + x + 1));
+                    Avx2.Store(dst + x, Avx2.And(Avx2.And(up, side), down));
+                }
+                for (; x < width - 1; x++)
+                    if (prev[x - 1] != 0 && prev[x] != 0 && prev[x + 1] != 0 &&
+                        cur[x - 1] != 0 && cur[x + 1] != 0 &&
+                        next[x - 1] != 0 && next[x] != 0 && next[x + 1] != 0)
+                        dst[x] = 1;
+            }
+        }
+        return interior;
+        #else
+        _ = bitmap; _ = interior; _ = width; _ = height; _ = pixels;
+        return null;
+        #endif
     }
 
     private static bool IsBoundary(byte[] bitmap, int width, int height, int x, int y)
