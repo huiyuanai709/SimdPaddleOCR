@@ -22,9 +22,12 @@ internal static unsafe partial class Nhwc
     /// <summary>Partial-sum floats per AVX-512 tile (8 x 16).</summary>
     private const int PartialFloats512 = TileRows512 * OcBlock;
 
-    /// <summary>Runtime gate for the AVX-512 path; PPOCR_NHWC512=0 forces the AVX2 kernels (A/B benchmarking).</summary>
-    private static readonly bool UseAvx512 =
-        Avx512F.IsSupported && Environment.GetEnvironmentVariable("PPOCR_NHWC512") != "0";
+    /// <summary>
+    /// NHWC AVX-512 kernels when the ISA is present. Layout on/off is
+    /// <c>PPOCR_NHWC</c> in <see cref="OnnxSharp.LayoutPlanner"/>; process-wide
+    /// ISA is <c>DOTNET_EnableAVX512</c> via <see cref="Avx512F.IsSupported"/>.
+    /// </summary>
+    private static readonly bool UseAvx512 = Avx512F.IsSupported;
 
     // ---------------------------------------------------------------- epilogue
 
