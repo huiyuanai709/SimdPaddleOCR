@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 using Sdcb.SimdPaddleOCR.OnnxSharp;
 
 namespace Sdcb.SimdPaddleOCR;
@@ -78,7 +79,7 @@ internal static class PPOCRPreprocess
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     internal static unsafe void DetBgrToNchw(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, int resizedWidth, int resizedHeight, Span<float> output,
-        ResizeWorkspace? workspace)
+        ResizeWorkspace? workspace, int intraOpThreads = 1)
     {
         ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
         int plane = checked(resizedWidth * resizedHeight);
@@ -102,34 +103,34 @@ internal static class PPOCRPreprocess
             fixed (float* outputPtr = output)
             fixed (float* normalizedPtr = DetNormalized)
             {
-                for (int oy = 0; oy < resizedHeight; oy++)
+                int workers = ResolveRowWorkers(resizedHeight, resizedWidth, intraOpThreads, workspace);
+                if (workers <= 1)
                 {
-                    GetLinearCoordinate(oy, sourceHeight, resizedHeight,
-                        out int sy, out short beta0, out short beta1);
-                    int sy0 = MathCompat.Clamp(sy, 0, sourceHeight - 1);
-                    int sy1 = MathCompat.Clamp(sy + 1, 0, sourceHeight - 1);
-                    BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy0,
-                        resizedWidth, xOffsets, xCoefficients, row0);
-                    BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy1,
-                        resizedWidth,
-                        xOffsets, xCoefficients, row1);
-                    int destination = oy * resizedWidth;
-                    for (int ox = 0; ox < resizedWidth; ox++)
+                    for (int oy = 0; oy < resizedHeight; oy++)
+                        DetRow(sourcePtr, sourceStride, sourceWidth, sourceHeight, resizedWidth,
+                            resizedHeight, oy, xOffsets, xCoefficients, row0, row1, outputPtr,
+                            normalizedPtr, plane);
+                }
+                else
+                {
+                    // Destination rows are independent and write disjoint output
+                    // ranges, so splitting them is pure distribution: the per-row
+                    // arithmetic is untouched and results stay bit-identical. Only
+                    // the shared row scratch moves to per-worker buffers.
+                    nint sourceAddress = (nint)sourcePtr, outputAddress = (nint)outputPtr,
+                        normalizedAddress = (nint)normalizedPtr;
+                    ResizeWorkspace shared = workspace!;
+                    Parallel.For(0, workers, worker =>
                     {
-                        int rowOffset = ox * 3;
-                        for (int channel = 0; channel < 3; channel++)
-                        {
-                            int h0 = row0[rowOffset + channel];
-                            int h1 = row1[rowOffset + channel];
-                            // VResizeLinearVec_32s8u from OpenCV's resize.cpp.
-                            int value = (((h0 >> 4) * beta0 >> 16) +
-                                ((h1 >> 4) * beta1 >> 16) + 2) >> 2;
-                            if (value < 0) value = 0;
-                            else if (value > 255) value = 255;
-                                outputPtr[channel * plane + destination + ox] =
-                                normalizedPtr[channel * 256 + value];
-                        }
-                    }
+                        byte* rowSource = (byte*)sourceAddress;
+                        float* rowOutput = (float*)outputAddress;
+                        float* rowLut = (float*)normalizedAddress;
+                        (int[] workerRow0, int[] workerRow1) = shared.RowsFor(worker);
+                        for (int oy = worker; oy < resizedHeight; oy += workers)
+                            DetRow(rowSource, sourceStride, sourceWidth, sourceHeight, resizedWidth,
+                                resizedHeight, oy, xOffsets, xCoefficients, workerRow0, workerRow1,
+                                rowOutput, rowLut, plane);
+                    });
                 }
             }
         }
@@ -145,6 +146,57 @@ internal static class PPOCRPreprocess
         }
     }
 
+    // Below this many rows per worker the per-worker setup (row scratch, task
+    // dispatch) outweighs the split, so the DET resize stays serial.
+    private const int MinRowsPerWorker = 24;
+
+    private static int ResolveRowWorkers(int resizedHeight, int resizedWidth, int intraOpThreads,
+        ResizeWorkspace? workspace)
+    {
+        if (workspace is null || intraOpThreads <= 1) return 1;
+        int workers = Math.Min(intraOpThreads, Math.Max(1, resizedHeight / MinRowsPerWorker));
+        if (workers < 2) return 1;
+        // Serial pre-allocation: the parallel body must not grow shared
+        // buffers, or concurrent growth loses a resize and leaves null slots.
+        workspace.PrepareRows(workers, resizedWidth);
+        return workers;
+    }
+
+    // One destination row: two horizontal passes into the caller-owned row
+    // scratch, then the vertical fixed-point blend and the normalization LUT.
+    // Split out so the row loop can run serially or sharded across workers
+    // without duplicating any arithmetic.
+    private static unsafe void DetRow(byte* sourcePtr, int sourceStride, int sourceWidth,
+        int sourceHeight, int resizedWidth, int resizedHeight, int oy, int[] xOffsets,
+        short[] xCoefficients, int[] row0, int[] row1, float* outputPtr, float* normalizedPtr,
+        int plane)
+    {
+        GetLinearCoordinate(oy, sourceHeight, resizedHeight,
+            out int sy, out short beta0, out short beta1);
+        int sy0 = MathCompat.Clamp(sy, 0, sourceHeight - 1);
+        int sy1 = MathCompat.Clamp(sy + 1, 0, sourceHeight - 1);
+        BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy0,
+            resizedWidth, xOffsets, xCoefficients, row0);
+        BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy1,
+            resizedWidth, xOffsets, xCoefficients, row1);
+        int destination = oy * resizedWidth;
+        for (int ox = 0; ox < resizedWidth; ox++)
+        {
+            int rowOffset = ox * 3;
+            for (int channel = 0; channel < 3; channel++)
+            {
+                int h0 = row0[rowOffset + channel];
+                int h1 = row1[rowOffset + channel];
+                // VResizeLinearVec_32s8u from OpenCV's resize.cpp.
+                int value = (((h0 >> 4) * beta0 >> 16) +
+                    ((h1 >> 4) * beta1 >> 16) + 2) >> 2;
+                if (value < 0) value = 0;
+                else if (value > 255) value = 255;
+                outputPtr[channel * plane + destination + ox] =
+                    normalizedPtr[channel * 256 + value];
+            }
+        }
+    }
     private static void BuildLinearCoefficients(int sourceSize, int destinationSize,
         int[] offsets, short[] coefficients)
     {
