@@ -111,6 +111,9 @@ public sealed class CompiledModel
 
     internal TensorMeta GetTensor(int index) => _tensors[index];
     internal NodeRecord GetNode(int index) => _model.Nodes[index];
+    /// <summary>Node index of the last consumer, or -1 when unconsumed; graph outputs carry the node count.</summary>
+    internal int LastUse(int tensorIndex) => _lastUse[tensorIndex];
+
     internal bool HasConsumerAfter(uint tensorIndex, int nodeIndex)
         => _lastUse[checked((int)tensorIndex)] > nodeIndex;
     internal bool IsGraphOutput(int tensorIndex) => _model.GraphOutputs.Contains((uint)tensorIndex);

@@ -223,17 +223,32 @@ public sealed partial class InferenceSession : IDisposable
             assigned[index] = true;
             planned[index] = true;
         }
+        // Bucket tensors by the node at which they become releasable: a
+        // tensor is freed when we reach the node right after its last
+        // consumer, i.e. exactly when the previous per-node scan condition
+        // `!HasConsumerAfter(i, ni - 1)` first became true. Graph outputs
+        // carry _lastUse == nodeCount, so their bucket index falls out of
+        // range and they are never released — same effect as the removed
+        // IsGraphOutput guard. Replaces an O(nodes x tensors) scan (DET:
+        // 245 x 411) that ran on every reshape, i.e. on every image.
+        int[] releaseHead = new int[nodeCount + 1];
+        int[] releaseNext = new int[tensorCount];
+        ArrayCompat.Fill(releaseHead, -1);
+        for (int i = 0; i < tensorCount; i++)
+        {
+            if (_tensors[i].IsConstant || lengths[i] == 0) continue;
+            int at = _compiled.LastUse(i) + 1;
+            if ((uint)at >= (uint)releaseHead.Length) continue;
+            releaseNext[i] = releaseHead[at];
+            releaseHead[at] = i;
+        }
         for (int ni = 0; ni < nodeCount; ni++)
         {
-            for (int i = 0; i < tensorCount; i++)
+            for (int i = releaseHead[ni]; i >= 0; i = releaseNext[i])
             {
-                if (assigned[i] && lengths[i] != 0 &&
-                    !_compiled.HasConsumerAfter((uint)i, ni - 1) &&
-                    !_compiled.IsGraphOutput(i))
-                {
-                    assigned[i] = false;
-                    Release(i);
-                }
+                if (!assigned[i]) continue;
+                assigned[i] = false;
+                Release(i);
             }
             foreach (uint output in _model.Nodes[ni].Outputs)
             {
