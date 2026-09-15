@@ -117,6 +117,14 @@ internal static partial class SimdKernels
         return Avx512F.Multiply(p, power);
     }
 
+    /// <summary>One 512-bit vector of <see cref="Gelu"/>: identical per-lane operation order to <see cref="GeluVector"/> so fused epilogues match it bit-for-bit.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector512<float> GeluVector512(Vector512<float> value)
+    {
+        Vector512<float> activated = Avx512F.Add(ErfVector512(Avx512F.Multiply(value, V512InvSqrtTwo)), V512One);
+        return Avx512F.Multiply(Avx512F.Multiply(value, activated), V512Half);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector512<float> ErfVector512(Vector512<float> value)
     {

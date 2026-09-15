@@ -226,6 +226,12 @@ internal static unsafe partial class Nhwc
             (!residual.IsEmpty && residual.Length < (long)pixels * outputChannels))
             throw new ArgumentException("NHWC pointwise buffer too small.");
         if (pixels <= 0) return;
+        if (UseAvx512)
+        {
+            Pointwise512(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
+                residual, activation, alpha, beta, threads);
+            return;
+        }
         int tiles = (pixels + TileRows - 1) / TileRows;
         int groupTiles = Math.Max(1, PointwiseGroupTiles);
         int groups = (tiles + groupTiles - 1) / groupTiles;
@@ -313,6 +319,13 @@ internal static unsafe partial class Nhwc
             outputHeight == height && outputWidth == width)
         {
             Pointwise(input, packedWeights, bias, output, batch * height * width, inputChannels, outputChannels,
+                residual, activation, alpha, beta, threads);
+            return;
+        }
+        if (UseAvx512)
+        {
+            Dense512(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
+                outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
                 residual, activation, alpha, beta, threads);
             return;
         }
