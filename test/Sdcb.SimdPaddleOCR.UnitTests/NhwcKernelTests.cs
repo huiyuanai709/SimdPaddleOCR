@@ -1,16 +1,17 @@
+using System.Numerics;
 using System.Runtime.Intrinsics.X86;
 using Sdcb.SimdPaddleOCR.Kernels;
 using static Sdcb.SimdPaddleOCR.UnitTests.KernelCorrectnessTests;
 
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
-/// <summary>Channels-last kernels against a scalar NCHW reference (AVX2+FMA hosts only).</summary>
+/// <summary>Channels-last kernels against a scalar NCHW reference (AVX2+FMA on net10, hardware Vector on the netstandard2.0 build).</summary>
 public class NhwcKernelTests
 {
-    // The netstandard2.0 library ships only the facade (the planner never
-    // enables NHWC there), so these kernels are exercised on the net10 build.
+    // The netstandard2.0 library implements the NHWC kernels with
+    // Vector<float>; enable them whenever hardware vectors are available.
 #if USE_NS20_LIBRARY
-    private static bool Supported => false;
+    private static bool Supported => Vector.IsHardwareAccelerated;
 #else
     private static bool Supported => Avx2.IsSupported && Fma.IsSupported;
 #endif

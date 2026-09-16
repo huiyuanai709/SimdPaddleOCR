@@ -84,6 +84,16 @@ internal static partial class SimdKernels
             positiveResult);
     }
 
+#if NETSTANDARD2_0
+    /// <summary>One vector of <see cref="Gelu"/>: identical per-lane operation order to the Gelu Vector loop.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector<float> GeluVectorExact(Vector<float> value)
+    {
+        Vector<float> activated = ErfExactVector(value * new Vector<float>(0.70710678118654752f)) + new Vector<float>(1f);
+        return value * activated * new Vector<float>(0.5f);
+    }
+#endif
+
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static Vector<float> ErfExactVector(Vector<float> value)
     {
