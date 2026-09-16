@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Numerics;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics.X86;
 #endif
@@ -18,14 +19,17 @@ internal static class LayoutPlanner
 {
     public const ushort ToNhwc = 1, ToNchw = 2;
 
-    /// <summary>NHWC kernels exist for AVX2+FMA only; other ISAs keep the NCHW graph unchanged.</summary>
+    /// <summary>
+    /// NHWC kernels exist for AVX2+FMA (net10) and for Vector&lt;float&gt;
+    /// (netstandard2.0); other ISAs keep the NCHW graph unchanged.
+    /// </summary>
     public static bool IsEnabled { get; } = ComputeEnabled();
 
     private static bool ComputeEnabled()
     {
         if (Environment.GetEnvironmentVariable("PPOCR_NHWC") == "0") return false;
 #if NETSTANDARD2_0
-        return false;
+        return Vector.IsHardwareAccelerated;
 #else
         return Avx2.IsSupported && Fma.IsSupported;
 #endif

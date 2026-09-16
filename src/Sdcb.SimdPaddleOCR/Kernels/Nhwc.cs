@@ -15,9 +15,9 @@ internal enum NhwcActivation
 /// <summary>
 /// Channels-last (NHWC) kernels used when <see cref="OnnxSharp.LayoutPlanner"/>
 /// runs a segment of the graph channels-last. All entry points take logical
-/// NCHW dimensions; the data is stored as [n][h][w][c]. Only the AVX2+FMA
-/// implementation exists; the planner never enables NHWC elsewhere, so the
-/// netstandard2.0 build only needs the facade.
+/// NCHW dimensions; the data is stored as [n][h][w][c]. The net10 build has
+/// AVX2+FMA and AVX-512 implementations; the netstandard2.0 build uses
+/// Vector&lt;float&gt; kernels (Nhwc.*.Vector.cs) with identical semantics.
 /// </summary>
 internal static partial class Nhwc
 {
@@ -102,34 +102,4 @@ internal static partial class Nhwc
         return packed;
     }
 
-#if NETSTANDARD2_0
-    private static NotSupportedException Unsupported() => new("NHWC kernels require AVX2/FMA on .NET 10.");
-
-    internal static void NchwToNhwc(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads) => throw Unsupported();
-    internal static void NhwcToNchw(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads) => throw Unsupported();
-    internal static void Pointwise(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
-        Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
-        NhwcActivation activation, float alpha, float beta, int threads) => throw Unsupported();
-    internal static void Dense(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
-        Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
-        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
-        ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads) => throw Unsupported();
-    internal static void Depthwise(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
-        Span<float> output, int batch, int channels, int height, int width, int outputHeight, int outputWidth,
-        int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
-        ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads) => throw Unsupported();
-    internal static void ConvTranspose2x2Stride2(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
-        Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
-        NhwcActivation activation, int threads) => throw Unsupported();
-    internal static void Pool(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
-        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft, bool max,
-        int threads = 1) => throw Unsupported();
-    internal static void ResizeNearest(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
-        int factorH, int factorW, int threads = 1) => throw Unsupported();
-    internal static void ReduceMeanSpatial(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane) => throw Unsupported();
-    internal static void BinaryChannel<TOp>(ReadOnlySpan<float> left, ReadOnlySpan<float> channel, Span<float> output,
-        int batch, int channels, int plane, bool channelIsLeft, bool channelPerBatch) where TOp : struct, IBinaryOp => throw Unsupported();
-    internal static void BatchNorm(ReadOnlySpan<float> input, Span<float> output, int pixels, int channels,
-        ReadOnlySpan<float> scale, ReadOnlySpan<float> bias, ReadOnlySpan<float> mean, ReadOnlySpan<float> variance, float epsilon) => throw Unsupported();
-#endif
 }
