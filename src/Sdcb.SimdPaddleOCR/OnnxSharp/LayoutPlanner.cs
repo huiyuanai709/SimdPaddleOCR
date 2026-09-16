@@ -21,7 +21,9 @@ internal static class LayoutPlanner
 
     /// <summary>
     /// NHWC kernels exist for AVX2+FMA (net10) and for Vector&lt;float&gt;
-    /// (netstandard2.0); other ISAs keep the NCHW graph unchanged.
+    /// widths 4 and 8 (netstandard2.0). Other ISAs keep the NCHW graph
+    /// unchanged: a Count != 4/8 Vector path would hit the scalar NHWC
+    /// fallback and lose the NCHW Vector/AdvSIMD kernels.
     /// </summary>
     public static bool IsEnabled { get; } = ComputeEnabled();
 
@@ -29,7 +31,8 @@ internal static class LayoutPlanner
     {
         if (Environment.GetEnvironmentVariable("PPOCR_NHWC") == "0") return false;
 #if NETSTANDARD2_0
-        return Vector.IsHardwareAccelerated;
+        int width = Vector<float>.Count;
+        return Vector.IsHardwareAccelerated && (width == 8 || width == 4);
 #else
         return Avx2.IsSupported && Fma.IsSupported;
 #endif

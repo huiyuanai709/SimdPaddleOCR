@@ -11,9 +11,10 @@ namespace Sdcb.SimdPaddleOCR.Kernels;
 // Vector<float> (netstandard2.0) channels-last convolution kernels. Same
 // register-blocking scheme as the AVX2 micro-kernel (6 pixels x 16 output
 // channels, bias-initialised chain over the flattened k = ic * taps + tap
-// index in ascending order), with Vector<float>.Count == 8 as the fast path
-// (12 accumulators + 2 weight vectors fill the 16 x64 vector registers) and a
-// scalar fallback for other widths. There is no FMA in Vector<T>: every
+// index in ascending order). Count == 8 is one 16-OC pass (12 accumulators +
+// 2 weight vectors). Count == 4 keeps the same 12-accumulator budget as two
+// 8-OC half-panel passes over the packed [k][16] weights. Other widths fall
+// back to a scalar double loop. There is no FMA in Vector<T>: every
 // accumulation is a separate multiply then add, exactly matching the per-lane
 // arithmetic of the NCHW Vector kernels. Like the AVX-512 kernels, the tile
 // kernels always spill their accumulators to the partial buffer and never
@@ -86,6 +87,36 @@ internal static unsafe partial class Nhwc
                 }
                 VectorStore(output + r * outStride, a);
                 VectorStore(output + r * outStride + 8, b);
+            }
+            return;
+        }
+        if (Vector<float>.Count == 4)
+        {
+            Vector<float> alpha = new(alphaScalar), beta = new(betaScalar), one = new(1f);
+            for (int r = 0; r < rows; r++)
+            {
+                for (int oc0 = 0; oc0 < OcBlock; oc0 += 8)
+                {
+                    Vector<float> a = VectorLoad(partial + r * OcBlock + oc0);
+                    Vector<float> b = VectorLoad(partial + r * OcBlock + oc0 + 4);
+                    if (biasAfter != null)
+                    {
+                        a += VectorLoad(biasAfter + oc0);
+                        b += VectorLoad(biasAfter + oc0 + 4);
+                    }
+                    if (residual != null)
+                    {
+                        a += VectorLoad(residual + r * resStride + oc0);
+                        b += VectorLoad(residual + r * resStride + oc0 + 4);
+                    }
+                    if (activation != NhwcActivation.None)
+                    {
+                        a = ActivateVec(a, activation, alpha, beta, one);
+                        b = ActivateVec(b, activation, alpha, beta, one);
+                    }
+                    VectorStore(output + r * outStride + oc0, a);
+                    VectorStore(output + r * outStride + oc0 + 4, b);
+                }
             }
             return;
         }
@@ -184,6 +215,60 @@ internal static unsafe partial class Nhwc
             VectorStore(partial + 80, a5); VectorStore(partial + 88, b5);
             return;
         }
+        if (Vector<float>.Count == 4)
+        {
+            float* p0 = input;
+            float* p1 = p0 + (rows > 1 ? inStride : 0);
+            float* p2 = p1 + (rows > 2 ? inStride : 0);
+            float* p3 = p2 + (rows > 3 ? inStride : 0);
+            float* p4 = p3 + (rows > 4 ? inStride : 0);
+            float* p5 = p4 + (rows > 5 ? inStride : 0);
+            for (int oc0 = 0; oc0 < OcBlock; oc0 += 8)
+            {
+                Vector<float> a0, a1, a2, a3, a4, a5, b0, b1, b2, b3, b4, b5;
+                if (k0 == 0)
+                {
+                    Vector<float> biasLow = bias == null ? Vector<float>.Zero : VectorLoad(bias + oc0);
+                    Vector<float> biasHigh = bias == null ? Vector<float>.Zero : VectorLoad(bias + oc0 + 4);
+                    a0 = a1 = a2 = a3 = a4 = a5 = biasLow;
+                    b0 = b1 = b2 = b3 = b4 = b5 = biasHigh;
+                }
+                else
+                {
+                    a0 = VectorLoad(partial + oc0); b0 = VectorLoad(partial + oc0 + 4);
+                    a1 = VectorLoad(partial + 16 + oc0); b1 = VectorLoad(partial + 20 + oc0);
+                    a2 = VectorLoad(partial + 32 + oc0); b2 = VectorLoad(partial + 36 + oc0);
+                    a3 = VectorLoad(partial + 48 + oc0); b3 = VectorLoad(partial + 52 + oc0);
+                    a4 = VectorLoad(partial + 64 + oc0); b4 = VectorLoad(partial + 68 + oc0);
+                    a5 = VectorLoad(partial + 80 + oc0); b5 = VectorLoad(partial + 84 + oc0);
+                }
+                float* wk = w + oc0;
+                for (int k = k0; k < kEnd; k++, wk += 16)
+                {
+                    Vector<float> w0 = VectorLoad(wk);
+                    Vector<float> w1 = VectorLoad(wk + 4);
+                    Vector<float> v0 = new(p0[k]);
+                    Vector<float> v1 = new(p1[k]);
+                    a0 += v0 * w0; b0 += v0 * w1;
+                    a1 += v1 * w0; b1 += v1 * w1;
+                    Vector<float> v2 = new(p2[k]);
+                    Vector<float> v3 = new(p3[k]);
+                    a2 += v2 * w0; b2 += v2 * w1;
+                    a3 += v3 * w0; b3 += v3 * w1;
+                    Vector<float> v4 = new(p4[k]);
+                    Vector<float> v5 = new(p5[k]);
+                    a4 += v4 * w0; b4 += v4 * w1;
+                    a5 += v5 * w0; b5 += v5 * w1;
+                }
+                VectorStore(partial + oc0, a0); VectorStore(partial + oc0 + 4, b0);
+                VectorStore(partial + 16 + oc0, a1); VectorStore(partial + 20 + oc0, b1);
+                VectorStore(partial + 32 + oc0, a2); VectorStore(partial + 36 + oc0, b2);
+                VectorStore(partial + 48 + oc0, a3); VectorStore(partial + 52 + oc0, b3);
+                VectorStore(partial + 64 + oc0, a4); VectorStore(partial + 68 + oc0, b4);
+                VectorStore(partial + 80 + oc0, a5); VectorStore(partial + 84 + oc0, b5);
+            }
+            return;
+        }
         for (int r = 0; r < rows; r++)
         {
             float* pr = input + (long)r * inStride;
@@ -265,6 +350,63 @@ internal static unsafe partial class Nhwc
             VectorStore(partial + 80, a5); VectorStore(partial + 88, b5);
             return;
         }
+        if (Vector<float>.Count == 4)
+        {
+            float* p0 = input;
+            float* p1 = p0 + (rows > 1 ? pixelStride : 0);
+            float* p2 = p1 + (rows > 2 ? pixelStride : 0);
+            float* p3 = p2 + (rows > 3 ? pixelStride : 0);
+            float* p4 = p3 + (rows > 4 ? pixelStride : 0);
+            float* p5 = p4 + (rows > 5 ? pixelStride : 0);
+            for (int oc0 = 0; oc0 < OcBlock; oc0 += 8)
+            {
+                Vector<float> a0, a1, a2, a3, a4, a5, b0, b1, b2, b3, b4, b5;
+                if (k0 == 0)
+                {
+                    Vector<float> biasLow = bias == null ? Vector<float>.Zero : VectorLoad(bias + oc0);
+                    Vector<float> biasHigh = bias == null ? Vector<float>.Zero : VectorLoad(bias + oc0 + 4);
+                    a0 = a1 = a2 = a3 = a4 = a5 = biasLow;
+                    b0 = b1 = b2 = b3 = b4 = b5 = biasHigh;
+                }
+                else
+                {
+                    a0 = VectorLoad(partial + oc0); b0 = VectorLoad(partial + oc0 + 4);
+                    a1 = VectorLoad(partial + 16 + oc0); b1 = VectorLoad(partial + 20 + oc0);
+                    a2 = VectorLoad(partial + 32 + oc0); b2 = VectorLoad(partial + 36 + oc0);
+                    a3 = VectorLoad(partial + 48 + oc0); b3 = VectorLoad(partial + 52 + oc0);
+                    a4 = VectorLoad(partial + 64 + oc0); b4 = VectorLoad(partial + 68 + oc0);
+                    a5 = VectorLoad(partial + 80 + oc0); b5 = VectorLoad(partial + 84 + oc0);
+                }
+                int ci = k0 / taps, tap = k0 - ci * taps;
+                float* wk = w + oc0;
+                for (int k = k0; k < kEnd; k++, wk += 16)
+                {
+                    int offset = tapOffsets[tap] + ci;
+                    Vector<float> w0 = VectorLoad(wk);
+                    Vector<float> w1 = VectorLoad(wk + 4);
+                    Vector<float> v0 = new(p0[offset]);
+                    Vector<float> v1 = new(p1[offset]);
+                    a0 += v0 * w0; b0 += v0 * w1;
+                    a1 += v1 * w0; b1 += v1 * w1;
+                    Vector<float> v2 = new(p2[offset]);
+                    Vector<float> v3 = new(p3[offset]);
+                    a2 += v2 * w0; b2 += v2 * w1;
+                    a3 += v3 * w0; b3 += v3 * w1;
+                    Vector<float> v4 = new(p4[offset]);
+                    Vector<float> v5 = new(p5[offset]);
+                    a4 += v4 * w0; b4 += v4 * w1;
+                    a5 += v5 * w0; b5 += v5 * w1;
+                    if (++tap == taps) { tap = 0; ci++; }
+                }
+                VectorStore(partial + oc0, a0); VectorStore(partial + oc0 + 4, b0);
+                VectorStore(partial + 16 + oc0, a1); VectorStore(partial + 20 + oc0, b1);
+                VectorStore(partial + 32 + oc0, a2); VectorStore(partial + 36 + oc0, b2);
+                VectorStore(partial + 48 + oc0, a3); VectorStore(partial + 52 + oc0, b3);
+                VectorStore(partial + 64 + oc0, a4); VectorStore(partial + 68 + oc0, b4);
+                VectorStore(partial + 80 + oc0, a5); VectorStore(partial + 84 + oc0, b5);
+            }
+            return;
+        }
         for (int r = 0; r < rows; r++)
         {
             float* pr = input + (long)r * pixelStride;
@@ -302,9 +444,11 @@ internal static unsafe partial class Nhwc
         if (pixels <= 0) return;
         int tiles = (pixels + TileRows - 1) / TileRows;
         int groupTiles = Math.Max(1, PointwiseGroupTiles);
-        int groups = (tiles + groupTiles - 1) / groupTiles;
         long work = (long)pixels * inputChannels * outputChannels;
-        int workers = threads > 1 && work >= 2_000_000 ? Math.Min(threads, groups) : 1;
+        // Shard whole tiles rather than tile groups: same makespan fix as the
+        // AVX2 Pointwise path (PR #8). Tiles are independent; each worker still
+        // walks its tiles in group-sized steps so weight-panel reuse is unchanged.
+        int workers = threads > 1 && work >= 2_000_000 ? Math.Min(threads, tiles) : 1;
         int kc = PointwiseKc <= 0 ? inputChannels : Math.Min(inputChannels, PointwiseKc);
         fixed (float* inPtr = input, wPtr = packedWeights, bPtr = bias, outPtr = output, rPtr = residual)
         {
@@ -312,9 +456,9 @@ internal static unsafe partial class Nhwc
             bool hasBias = !bias.IsEmpty, hasResidual = !residual.IsEmpty;
             void Worker(int worker)
             {
-                int groupBegin = (int)((long)groups * worker / workers);
-                int groupEnd = (int)((long)groups * (worker + 1) / workers);
-                if (groupEnd <= groupBegin) return;
+                int tileBegin = (int)((long)tiles * worker / workers);
+                int tileEnd = (int)((long)tiles * (worker + 1) / workers);
+                if (tileEnd <= tileBegin) return;
                 float[] partialArray = ArrayPool<float>.Shared.Rent(groupTiles * PartialFloats);
                 try
                 {
@@ -324,10 +468,12 @@ internal static unsafe partial class Nhwc
                         float* biasBase = hasBias ? (float*)bA : null, resBase = hasResidual ? (float*)rA : null;
                         int ocBlocks = outputChannels / OcBlock;
                         long panel = (long)inputChannels * OcBlock;
-                        for (int group = groupBegin; group < groupEnd; group++)
+                        int firstGroup = tileBegin / groupTiles, lastGroup = (tileEnd + groupTiles - 1) / groupTiles;
+                        for (int group = firstGroup; group < lastGroup; group++)
                         {
-                            int tileBegin = group * groupTiles;
-                            int tileEnd = Math.Min(tiles, tileBegin + groupTiles);
+                            int tileFrom = Math.Max(tileBegin, group * groupTiles);
+                            int tileTo = Math.Min(tileEnd, (group + 1) * groupTiles);
+                            if (tileTo <= tileFrom) continue;
                             for (int ocBlock = 0; ocBlock < ocBlocks; ocBlock++)
                             {
                                 float* w = wBase + ocBlock * panel;
@@ -338,11 +484,11 @@ internal static unsafe partial class Nhwc
                                     int kEnd = Math.Min(inputChannels, k0 + kc);
                                     float* wk = w + (long)k0 * OcBlock;
                                     bool final = kEnd == inputChannels;
-                                    for (int tile = tileBegin; tile < tileEnd; tile++)
+                                    for (int tile = tileFrom; tile < tileTo; tile++)
                                     {
                                         int pixel = tile * TileRows;
                                         int rows = Math.Min(TileRows, pixels - pixel);
-                                        float* tilePartial = partial + (tile - tileBegin) * PartialFloats;
+                                        float* tilePartial = partial + (tile - tileFrom) * PartialFloats;
                                         GemmTile16Vec(inBase + (long)pixel * inputChannels, rows, inputChannels, wk, k0, kEnd,
                                             b, tilePartial);
                                         if (final)

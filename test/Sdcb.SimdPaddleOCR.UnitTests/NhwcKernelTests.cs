@@ -9,9 +9,10 @@ namespace Sdcb.SimdPaddleOCR.UnitTests;
 public class NhwcKernelTests
 {
     // The netstandard2.0 library implements the NHWC kernels with
-    // Vector<float>; enable them whenever hardware vectors are available.
+    // Vector<float> widths 4 and 8 (same gate as LayoutPlanner).
 #if USE_NS20_LIBRARY
-    private static bool Supported => Vector.IsHardwareAccelerated;
+    private static bool Supported => Vector.IsHardwareAccelerated &&
+        (Vector<float>.Count == 8 || Vector<float>.Count == 4);
 #else
     private static bool Supported => Avx2.IsSupported && Fma.IsSupported;
 #endif
