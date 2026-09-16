@@ -1,5 +1,8 @@
 using System.Buffers.Binary;
-using Sdcb.SimdPaddleOCR.Kernels;
+using System.Numerics;
+#if !NETSTANDARD2_0
+using System.Runtime.Intrinsics.X86;
+#endif
 
 namespace Sdcb.SimdPaddleOCR.OnnxSharp;
 
@@ -25,7 +28,14 @@ internal static class LayoutPlanner
     public static bool IsEnabled { get; } = ComputeEnabled();
 
     private static bool ComputeEnabled()
-        => Environment.GetEnvironmentVariable("PPOCR_NHWC") != "0" && Nhwc.Isa != NhwcIsa.Scalar;
+    {
+        if (Environment.GetEnvironmentVariable("PPOCR_NHWC") == "0") return false;
+#if !NETSTANDARD2_0
+        if (Avx512F.IsSupported) return true;
+        if (Avx2.IsSupported && Fma.IsSupported) return true;
+#endif
+        return Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4;
+    }
 
     public static void Apply(ref TensorRecord[] tensors, ref NodeRecord[] nodes,
         ref byte[][] tensorData, ref byte[][] nodeParameters, uint[] graphInputs, uint[] graphOutputs)

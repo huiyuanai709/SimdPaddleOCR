@@ -17,21 +17,13 @@ internal enum NhwcActivation
     Gelu = 4,
 }
 
-/// <summary>Runtime ISA for the NHWC kernels. Shared by <see cref="OnnxSharp.LayoutPlanner"/> and the dispatchers below.</summary>
-internal enum NhwcIsa
-{
-    Avx512 = 0,
-    Avx2 = 1,
-    Vector = 2,
-    Scalar = 3,
-}
-
 /// <summary>
 /// Channels-last (NHWC) kernels used when <see cref="OnnxSharp.LayoutPlanner"/>
 /// runs a segment of the graph channels-last. All entry points take logical
-/// NCHW dimensions; the data is stored as [n][h][w][c]. Dispatch is by
-/// <see cref="Isa"/>: AVX-512, AVX2+FMA, <see cref="Vector{T}"/> widths 4/8,
-/// then scalar. The same kernels compile on net10 and netstandard2.0.
+/// NCHW dimensions; the data is stored as [n][h][w][c]. Each entry dispatches
+/// with <c>Avx512F.IsSupported</c> / AVX2+FMA / <see cref="Vector{T}"/>
+/// widths 4/8 / scalar, same as the NCHW kernels. The Vector files compile on
+/// both TFMs; ns2 cannot name the Avx methods.
 /// </summary>
 internal static unsafe partial class Nhwc
 {
@@ -41,19 +33,6 @@ internal static unsafe partial class Nhwc
     private const int TileRows = 6;
     /// <summary>Partial-sum floats per tile (6 x 16).</summary>
     private const int PartialFloats = TileRows * OcBlock;
-
-    internal static readonly NhwcIsa Isa = DetectIsa();
-
-    private static NhwcIsa DetectIsa()
-    {
-#if !NETSTANDARD2_0
-        if (Avx512F.IsSupported) return NhwcIsa.Avx512;
-        if (Avx2.IsSupported && Fma.IsSupported) return NhwcIsa.Avx2;
-#endif
-        int width = Vector<float>.Count;
-        if (Vector.IsHardwareAccelerated && (width == 8 || width == 4)) return NhwcIsa.Vector;
-        return NhwcIsa.Scalar;
-    }
 
     // Tuning knobs (measured on Zen 3; see test KernelBench). 0 disables blocking.
     /// <summary>Input-channel block for the pointwise GEMM; the L2-streamed full panel measured best on Zen 3.</summary>
@@ -74,15 +53,15 @@ internal static unsafe partial class Nhwc
         NhwcActivation activation, float alpha, float beta, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             Pointwise512(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
                 residual, activation, alpha, beta, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             PointwiseAvx(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
                 residual, activation, alpha, beta, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             PointwiseVec(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
                 residual, activation, alpha, beta, threads);
         else
@@ -101,17 +80,17 @@ internal static unsafe partial class Nhwc
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             Dense512(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
                 outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
                 residual, activation, alpha, beta, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             DenseAvx(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
                 outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
                 residual, activation, alpha, beta, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             DenseVec(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
                 outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
                 residual, activation, alpha, beta, threads);
@@ -131,15 +110,15 @@ internal static unsafe partial class Nhwc
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             DepthwiseAvx(input, packedWeights, bias, output, batch, channels, height, width, outputHeight, outputWidth,
                 kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             DepthwiseAvx(input, packedWeights, bias, output, batch, channels, height, width, outputHeight, outputWidth,
                 kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             DepthwiseVec(input, packedWeights, bias, output, batch, channels, height, width, outputHeight, outputWidth,
                 kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
         else
@@ -157,13 +136,13 @@ internal static unsafe partial class Nhwc
         NhwcActivation activation, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             ConvTranspose2x2Stride2Avx(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             ConvTranspose2x2Stride2Avx(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             ConvTranspose2x2Stride2Vec(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
         else
             ConvTranspose2x2Stride2Scalar(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
@@ -173,13 +152,13 @@ internal static unsafe partial class Nhwc
     internal static void NchwToNhwc(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             NchwToNhwcAvx(source, destination, batch, channels, plane, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             NchwToNhwcAvx(source, destination, batch, channels, plane, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             NchwToNhwcVec(source, destination, batch, channels, plane, threads);
         else
             NchwToNhwcScalar(source, destination, batch, channels, plane, threads);
@@ -189,13 +168,13 @@ internal static unsafe partial class Nhwc
     internal static void NhwcToNchw(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             NhwcToNchwAvx(source, destination, batch, channels, plane, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             NhwcToNchwAvx(source, destination, batch, channels, plane, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             NhwcToNchwVec(source, destination, batch, channels, plane, threads);
         else
             NhwcToNchwScalar(source, destination, batch, channels, plane, threads);
@@ -207,13 +186,13 @@ internal static unsafe partial class Nhwc
         int threads = 1)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             PoolAvx(input, output, batch, channels, height, width, outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft, max, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             PoolAvx(input, output, batch, channels, height, width, outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft, max, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             PoolVec(input, output, batch, channels, height, width, outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft, max, threads);
         else
             PoolScalar(input, output, batch, channels, height, width, outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft, max, threads);
@@ -224,13 +203,13 @@ internal static unsafe partial class Nhwc
         int factorH, int factorW, int threads = 1)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             ResizeNearestAvx(input, output, batch, channels, height, width, factorH, factorW, threads);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             ResizeNearestAvx(input, output, batch, channels, height, width, factorH, factorW, threads);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             ResizeNearestVec(input, output, batch, channels, height, width, factorH, factorW, threads);
         else
             ResizeNearestScalar(input, output, batch, channels, height, width, factorH, factorW, threads);
@@ -240,13 +219,13 @@ internal static unsafe partial class Nhwc
     internal static void ReduceMeanSpatial(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             ReduceMeanSpatialAvx(input, output, batch, channels, plane);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             ReduceMeanSpatialAvx(input, output, batch, channels, plane);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             ReduceMeanSpatialVec(input, output, batch, channels, plane);
         else
             ReduceMeanSpatialScalar(input, output, batch, channels, plane);
@@ -260,13 +239,13 @@ internal static unsafe partial class Nhwc
         int batch, int channels, int plane, bool channelIsLeft, bool channelPerBatch) where TOp : struct, IBinaryOp
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             BinaryChannelAvx<TOp>(left, channel, output, batch, channels, plane, channelIsLeft, channelPerBatch);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             BinaryChannelAvx<TOp>(left, channel, output, batch, channels, plane, channelIsLeft, channelPerBatch);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             BinaryChannelVec<TOp>(left, channel, output, batch, channels, plane, channelIsLeft, channelPerBatch);
         else
             BinaryChannelScalar<TOp>(left, channel, output, batch, channels, plane, channelIsLeft, channelPerBatch);
@@ -277,13 +256,13 @@ internal static unsafe partial class Nhwc
         ReadOnlySpan<float> scale, ReadOnlySpan<float> bias, ReadOnlySpan<float> mean, ReadOnlySpan<float> variance, float epsilon)
     {
 #if !NETSTANDARD2_0
-        if (Isa == NhwcIsa.Avx512)
+        if (Avx512F.IsSupported)
             BatchNormAvx(input, output, pixels, channels, scale, bias, mean, variance, epsilon);
-        else if (Isa == NhwcIsa.Avx2)
+        else if (Avx2.IsSupported && Fma.IsSupported)
             BatchNormAvx(input, output, pixels, channels, scale, bias, mean, variance, epsilon);
         else
 #endif
-        if (Isa == NhwcIsa.Vector)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
             BatchNormVec(input, output, pixels, channels, scale, bias, mean, variance, epsilon);
         else
             BatchNormScalar(input, output, pixels, channels, scale, bias, mean, variance, epsilon);
