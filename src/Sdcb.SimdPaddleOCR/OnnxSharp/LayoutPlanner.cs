@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
+using System.Numerics;
 #if !NETSTANDARD2_0
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 #endif
 
@@ -18,17 +20,25 @@ internal static class LayoutPlanner
 {
     public const ushort ToNhwc = 1, ToNchw = 2;
 
-    /// <summary>NHWC kernels exist for AVX2+FMA only; other ISAs keep the NCHW graph unchanged.</summary>
+    /// <summary>
+    /// NHWC kernels exist for AVX-512, AVX2+FMA, and Vector&lt;float&gt;
+    /// widths 4 and 8. Other ISAs keep the NCHW graph unchanged: a Count != 4/8
+    /// Vector path would hit the scalar NHWC fallback and lose the NCHW
+    /// Vector/AdvSIMD kernels. net10 ARM stays NCHW — AdvSIMD measured faster
+    /// than the Count==4 NHWC Vector path (linux-arm64 tiny-4w ~230 vs ~286).
+    /// ns2 ARM still opens NHWC (no AdvSIMD NCHW kernels).
+    /// </summary>
     public static bool IsEnabled { get; } = ComputeEnabled();
 
     private static bool ComputeEnabled()
     {
         if (Environment.GetEnvironmentVariable("PPOCR_NHWC") == "0") return false;
-#if NETSTANDARD2_0
-        return false;
-#else
-        return Avx2.IsSupported && Fma.IsSupported;
+#if !NETSTANDARD2_0
+        if (Avx512F.IsSupported) return true;
+        if (Avx2.IsSupported && Fma.IsSupported) return true;
+        if (AdvSimd.IsSupported) return false;
 #endif
+        return Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4;
     }
 
     public static void Apply(ref TensorRecord[] tensors, ref NodeRecord[] nodes,

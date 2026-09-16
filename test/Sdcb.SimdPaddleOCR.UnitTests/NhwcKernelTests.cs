@@ -1,19 +1,20 @@
+using System.Numerics;
+#if !NETSTANDARD2_0
 using System.Runtime.Intrinsics.X86;
+#endif
 using Sdcb.SimdPaddleOCR.Kernels;
 using static Sdcb.SimdPaddleOCR.UnitTests.KernelCorrectnessTests;
 
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
-/// <summary>Channels-last kernels against a scalar NCHW reference (AVX2+FMA hosts only).</summary>
+/// <summary>Channels-last kernels against a scalar NCHW reference. Same gate as LayoutPlanner (AVX-512, AVX2+FMA, or Vector 4/8).</summary>
 public class NhwcKernelTests
 {
-    // The netstandard2.0 library ships only the facade (the planner never
-    // enables NHWC there), so these kernels are exercised on the net10 build.
-#if USE_NS20_LIBRARY
-    private static bool Supported => false;
-#else
-    private static bool Supported => Avx2.IsSupported && Fma.IsSupported;
+    private static bool Supported =>
+#if !NETSTANDARD2_0
+        Avx512F.IsSupported || (Avx2.IsSupported && Fma.IsSupported) ||
 #endif
+        (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4);
 
     private static float[] Rand(int length, int seed, float scale = 1f)
     {

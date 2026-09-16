@@ -1,16 +1,22 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 using System.Threading.Tasks;
+
+using static Sdcb.SimdPaddleOCR.Kernels.SimdOps;
 
 namespace Sdcb.SimdPaddleOCR.Kernels;
 
+// Vector<float> (netstandard2.0) layout/pool/reduce/elementwise kernels; the
+// same semantics as the AVX2 versions with Vector<float>.Count-wide lanes and
+// a scalar tail. Transposes are scalar 8x8 block copies (bit-exact moves,
+// memory-bound either way); pooling divides by the in-bounds tap count and
+// ReduceMeanSpatial divides by the plane, never by a reciprocal.
 internal static unsafe partial class Nhwc
 {
     // ------------------------------------------------------ layout conversion
 
-    /// <summary>[n][c][plane] -> [n][plane][c] using 8x8 register transposes.</summary>
-    private static void NchwToNhwcAvx(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
+    /// <summary>[n][c][plane] -> [n][plane][c] using scalar 8x8 block transposes.</summary>
+    private static void NchwToNhwcVec(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
     {
         long volume = (long)batch * channels * plane;
         if (source.Length < volume || destination.Length < volume) throw new ArgumentException("Layout conversion buffer too small.");
@@ -28,7 +34,7 @@ internal static unsafe partial class Nhwc
                     float* src = (float*)srcA + (long)b * channels * plane;
                     float* dst = (float*)dstA + (long)b * channels * plane;
                     // src[c * plane + p] -> dst[p * channels + c]
-                    TransposeBlocks(src, plane, dst, channels, channels, pBegin, pEnd);
+                    TransposeBlocksVec(src, plane, dst, channels, channels, pBegin, pEnd);
                 }
             }
             if (workers > 1) Parallel.For(0, workers, Worker);
@@ -37,7 +43,7 @@ internal static unsafe partial class Nhwc
     }
 
     /// <summary>[n][plane][c] -> [n][c][plane].</summary>
-    private static void NhwcToNchwAvx(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
+    private static void NhwcToNchwVec(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
     {
         long volume = (long)batch * channels * plane;
         if (source.Length < volume || destination.Length < volume) throw new ArgumentException("Layout conversion buffer too small.");
@@ -55,7 +61,7 @@ internal static unsafe partial class Nhwc
                     float* src = (float*)srcA + (long)b * channels * plane;
                     float* dst = (float*)dstA + (long)b * channels * plane;
                     // src[p * channels + c] -> dst[c * plane + p]
-                    TransposeBlocks(src, channels, dst, plane, plane, cBegin, cEnd);
+                    TransposeBlocksVec(src, channels, dst, plane, plane, cBegin, cEnd);
                 }
             }
             if (workers > 1) Parallel.For(0, workers, Worker);
@@ -66,7 +72,7 @@ internal static unsafe partial class Nhwc
     // Transposes the matrix src[rows][cols] (row stride srcStride) into
     // dst[cols][rows] (row stride dstStride) for source columns [colBegin, colEnd).
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    private static void TransposeBlocks(float* src, int srcStride, float* dst, int dstStride, int rows, int colBegin, int colEnd)
+    private static void TransposeBlocksVec(float* src, int srcStride, float* dst, int dstStride, int rows, int colBegin, int colEnd)
     {
         int rows8 = rows & ~7;
         int col = colBegin;
@@ -74,7 +80,21 @@ internal static unsafe partial class Nhwc
         {
             int row = 0;
             for (; row < rows8; row += 8)
-                Transpose8x8(src + (long)row * srcStride + col, srcStride, dst + (long)col * dstStride + row, dstStride);
+            {
+                float* s = src + (long)row * srcStride + col;
+                float* d = dst + (long)col * dstStride + row;
+                for (int i = 0; i < 8; i++, s += srcStride, d++)
+                {
+                    d[0] = s[0];
+                    d[(long)dstStride] = s[1];
+                    d[(long)2 * dstStride] = s[2];
+                    d[(long)3 * dstStride] = s[3];
+                    d[(long)4 * dstStride] = s[4];
+                    d[(long)5 * dstStride] = s[5];
+                    d[(long)6 * dstStride] = s[6];
+                    d[(long)7 * dstStride] = s[7];
+                }
+            }
             for (; row < rows; row++)
                 for (int j = 0; j < 8; j++)
                     dst[(long)(col + j) * dstStride + row] = src[(long)row * srcStride + col + j];
@@ -84,39 +104,10 @@ internal static unsafe partial class Nhwc
                 dst[(long)col * dstStride + row] = src[(long)row * srcStride + col];
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Transpose8x8(float* src, int srcStride, float* dst, int dstStride)
-    {
-        Vector256<float> r0 = Avx.LoadVector256(src);
-        Vector256<float> r1 = Avx.LoadVector256(src + srcStride);
-        Vector256<float> r2 = Avx.LoadVector256(src + 2L * srcStride);
-        Vector256<float> r3 = Avx.LoadVector256(src + 3L * srcStride);
-        Vector256<float> r4 = Avx.LoadVector256(src + 4L * srcStride);
-        Vector256<float> r5 = Avx.LoadVector256(src + 5L * srcStride);
-        Vector256<float> r6 = Avx.LoadVector256(src + 6L * srcStride);
-        Vector256<float> r7 = Avx.LoadVector256(src + 7L * srcStride);
-        Vector256<float> t0 = Avx.UnpackLow(r0, r1), t1 = Avx.UnpackHigh(r0, r1);
-        Vector256<float> t2 = Avx.UnpackLow(r2, r3), t3 = Avx.UnpackHigh(r2, r3);
-        Vector256<float> t4 = Avx.UnpackLow(r4, r5), t5 = Avx.UnpackHigh(r4, r5);
-        Vector256<float> t6 = Avx.UnpackLow(r6, r7), t7 = Avx.UnpackHigh(r6, r7);
-        Vector256<float> s0 = Avx.Shuffle(t0, t2, 0x44), s1 = Avx.Shuffle(t0, t2, 0xEE);
-        Vector256<float> s2 = Avx.Shuffle(t1, t3, 0x44), s3 = Avx.Shuffle(t1, t3, 0xEE);
-        Vector256<float> s4 = Avx.Shuffle(t4, t6, 0x44), s5 = Avx.Shuffle(t4, t6, 0xEE);
-        Vector256<float> s6 = Avx.Shuffle(t5, t7, 0x44), s7 = Avx.Shuffle(t5, t7, 0xEE);
-        Avx.Store(dst, Avx.Permute2x128(s0, s4, 0x20));
-        Avx.Store(dst + dstStride, Avx.Permute2x128(s1, s5, 0x20));
-        Avx.Store(dst + 2L * dstStride, Avx.Permute2x128(s2, s6, 0x20));
-        Avx.Store(dst + 3L * dstStride, Avx.Permute2x128(s3, s7, 0x20));
-        Avx.Store(dst + 4L * dstStride, Avx.Permute2x128(s0, s4, 0x31));
-        Avx.Store(dst + 5L * dstStride, Avx.Permute2x128(s1, s5, 0x31));
-        Avx.Store(dst + 6L * dstStride, Avx.Permute2x128(s2, s6, 0x31));
-        Avx.Store(dst + 7L * dstStride, Avx.Permute2x128(s3, s7, 0x31));
-    }
-
     // ------------------------------------------------------------------ pooling
 
     /// <summary>Max / average pooling (average divides by the number of in-bounds taps, as the NCHW path does).</summary>
-    private static void PoolAvx(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
+    private static void PoolVec(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
         int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft, bool max,
         int threads = 1)
     {
@@ -124,7 +115,8 @@ internal static unsafe partial class Nhwc
         if (input.Length < (long)batch * height * width * channels || output.Length < outVolume)
             throw new ArgumentException("NHWC pool buffer too small.");
         if (outVolume == 0) return;
-        int vectorEnd = channels & ~7;
+        int vecWidth = Vector<float>.Count;
+        int vectorEnd = channels / vecWidth * vecWidth;
         int rowsTotal = batch * outputHeight;
         int workers = threads > 1 && outVolume >= 1 << 18 ? Math.Min(threads, rowsTotal) : 1;
         fixed (float* inPtr = input, outPtr = output)
@@ -152,19 +144,19 @@ internal static unsafe partial class Nhwc
                             continue;
                         }
                         int c = 0;
-                        for (; c < vectorEnd; c += 8)
+                        for (; c < vectorEnd; c += vecWidth)
                         {
-                            Vector256<float> acc = max ? Vector256.Create(float.NegativeInfinity) : Vector256<float>.Zero;
+                            Vector<float> acc = max ? new Vector<float>(float.NegativeInfinity) : Vector<float>.Zero;
                             for (int ky = kyBegin; ky < kyEnd; ky++)
                             {
                                 float* srcRow = inBatch + ((long)(iy0 + ky) * width + ix0) * channels + c;
                                 for (int kx = kxBegin; kx < kxEnd; kx++)
                                 {
-                                    Vector256<float> v = Avx.LoadVector256(srcRow + (long)kx * channels);
-                                    acc = max ? Avx.Max(acc, v) : Avx.Add(acc, v);
+                                    Vector<float> v = VectorLoad(srcRow + (long)kx * channels);
+                                    acc = max ? Vector.Max(acc, v) : acc + v;
                                 }
                             }
-                            Avx.Store(dst + c, max ? acc : Avx.Divide(acc, Vector256.Create((float)count)));
+                            VectorStore(dst + c, max ? acc : acc / new Vector<float>((float)count));
                         }
                         for (; c < channels; c++)
                         {
@@ -188,7 +180,7 @@ internal static unsafe partial class Nhwc
     // ------------------------------------------------------------------- resize
 
     /// <summary>Nearest-neighbour integer upsampling: each input pixel vector is repeated factorW times, each row factorH times.</summary>
-    private static void ResizeNearestAvx(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
+    private static void ResizeNearestVec(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
         int factorH, int factorW, int threads = 1)
     {
         int outputWidth = width * factorW, outputHeight = height * factorH;
@@ -226,12 +218,13 @@ internal static unsafe partial class Nhwc
     // -------------------------------------------------------------- reductions
 
     /// <summary>Spatial mean per (batch, channel): output is [n][c] (== NCHW [n,c,1,1]).</summary>
-    private static void ReduceMeanSpatialAvx(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane)
+    private static void ReduceMeanSpatialVec(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane)
     {
         if (input.Length < (long)batch * channels * plane || output.Length < (long)batch * channels)
             throw new ArgumentException("NHWC reduce buffer too small.");
         if (plane <= 0) { output.Slice(0, batch * channels).Clear(); return; }
-        int vectorEnd = channels & ~7;
+        int vecWidth = Vector<float>.Count;
+        int vectorEnd = channels / vecWidth * vecWidth;
         fixed (float* inPtr = input, outPtr = output)
         {
             for (int b = 0; b < batch; b++)
@@ -242,8 +235,8 @@ internal static unsafe partial class Nhwc
                 for (int p = 0; p < plane; p++, src += channels)
                 {
                     int c = 0;
-                    for (; c < vectorEnd; c += 8)
-                        Avx.Store(dst + c, Avx.Add(Avx.LoadVector256(dst + c), Avx.LoadVector256(src + c)));
+                    for (; c < vectorEnd; c += vecWidth)
+                        VectorStore(dst + c, VectorLoad(dst + c) + VectorLoad(src + c));
                     for (; c < channels; c++) dst[c] += src[c];
                 }
                 float inv = plane;
@@ -258,14 +251,15 @@ internal static unsafe partial class Nhwc
     /// Binary op between an NHWC activation [n][plane][c] and a channel vector
     /// ([c] shared, or [n][c] when <paramref name="channelPerBatch"/>).
     /// </summary>
-    private static void BinaryChannelAvx<TOp>(ReadOnlySpan<float> left, ReadOnlySpan<float> channel, Span<float> output,
+    private static void BinaryChannelVec<TOp>(ReadOnlySpan<float> left, ReadOnlySpan<float> channel, Span<float> output,
         int batch, int channels, int plane, bool channelIsLeft, bool channelPerBatch) where TOp : struct, IBinaryOp
     {
         long volume = (long)batch * plane * channels;
         if (left.Length < volume || output.Length < volume || channel.Length < (channelPerBatch ? (long)batch * channels : channels))
             throw new ArgumentException("NHWC channel broadcast buffer too small.");
         TOp op = default;
-        int vectorEnd = channels & ~7;
+        int vecWidth = Vector<float>.Count;
+        int vectorEnd = channels / vecWidth * vecWidth;
         fixed (float* aPtr = left, cPtr = channel, oPtr = output)
         {
             for (int b = 0; b < batch; b++)
@@ -276,10 +270,10 @@ internal static unsafe partial class Nhwc
                 for (int p = 0; p < plane; p++, a += channels, o += channels)
                 {
                     int c = 0;
-                    for (; c < vectorEnd; c += 8)
+                    for (; c < vectorEnd; c += vecWidth)
                     {
-                        Vector256<float> x = Avx.LoadVector256(a + c), y = Avx.LoadVector256(ch + c);
-                        Avx.Store(o + c, channelIsLeft ? op.Apply(y, x) : op.Apply(x, y));
+                        Vector<float> x = VectorLoad(a + c), y = VectorLoad(ch + c);
+                        VectorStore(o + c, channelIsLeft ? op.Apply(y, x) : op.Apply(x, y));
                     }
                     for (; c < channels; c++)
                         o[c] = channelIsLeft ? op.Apply(ch[c], a[c]) : op.Apply(a[c], ch[c]);
@@ -289,7 +283,7 @@ internal static unsafe partial class Nhwc
     }
 
     /// <summary>Inference batch-norm: (x - mean) * scale / sqrt(var + eps) + bias, per channel.</summary>
-    private static void BatchNormAvx(ReadOnlySpan<float> input, Span<float> output, int pixels, int channels,
+    private static void BatchNormVec(ReadOnlySpan<float> input, Span<float> output, int pixels, int channels,
         ReadOnlySpan<float> scale, ReadOnlySpan<float> bias, ReadOnlySpan<float> mean, ReadOnlySpan<float> variance, float epsilon)
     {
         if (input.Length < (long)pixels * channels || output.Length < (long)pixels * channels ||
@@ -297,21 +291,48 @@ internal static unsafe partial class Nhwc
             throw new ArgumentException("NHWC batch-norm buffer too small.");
         float[] k = new float[channels];
         for (int c = 0; c < channels; c++) k[c] = scale[c] / MathF.Sqrt(variance[c] + epsilon);
-        int vectorEnd = channels & ~7;
+        int vecWidth = Vector<float>.Count;
+        int vectorEnd = channels / vecWidth * vecWidth;
         fixed (float* inPtr = input, outPtr = output, kPtr = k, meanPtr = mean, biasPtr = bias)
         {
             float* src = inPtr, dst = outPtr;
             for (int p = 0; p < pixels; p++, src += channels, dst += channels)
             {
                 int c = 0;
-                for (; c < vectorEnd; c += 8)
+                for (; c < vectorEnd; c += vecWidth)
                 {
-                    Vector256<float> x = Avx.Subtract(Avx.LoadVector256(src + c), Avx.LoadVector256(meanPtr + c));
-                    Avx.Store(dst + c, Avx.Add(Avx.Multiply(x, Avx.LoadVector256(kPtr + c)), Avx.LoadVector256(biasPtr + c)));
+                    Vector<float> x = VectorLoad(src + c) - VectorLoad(meanPtr + c);
+                    VectorStore(dst + c, x * VectorLoad(kPtr + c) + VectorLoad(biasPtr + c));
                 }
                 for (; c < channels; c++)
                     dst[c] = (src[c] - mean[c]) * k[c] + bias[c];
             }
         }
     }
+
+    private static void NchwToNhwcScalar(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
+        => NchwToNhwcVec(source, destination, batch, channels, plane, threads);
+
+    private static void NhwcToNchwScalar(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
+        => NhwcToNchwVec(source, destination, batch, channels, plane, threads);
+
+    private static void PoolScalar(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
+        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft, bool max,
+        int threads = 1)
+        => PoolVec(input, output, batch, channels, height, width, outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft, max, threads);
+
+    private static void ResizeNearestScalar(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
+        int factorH, int factorW, int threads = 1)
+        => ResizeNearestVec(input, output, batch, channels, height, width, factorH, factorW, threads);
+
+    private static void ReduceMeanSpatialScalar(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane)
+        => ReduceMeanSpatialVec(input, output, batch, channels, plane);
+
+    private static void BinaryChannelScalar<TOp>(ReadOnlySpan<float> left, ReadOnlySpan<float> channel, Span<float> output,
+        int batch, int channels, int plane, bool channelIsLeft, bool channelPerBatch) where TOp : struct, IBinaryOp
+        => BinaryChannelVec<TOp>(left, channel, output, batch, channels, plane, channelIsLeft, channelPerBatch);
+
+    private static void BatchNormScalar(ReadOnlySpan<float> input, Span<float> output, int pixels, int channels,
+        ReadOnlySpan<float> scale, ReadOnlySpan<float> bias, ReadOnlySpan<float> mean, ReadOnlySpan<float> variance, float epsilon)
+        => BatchNormVec(input, output, pixels, channels, scale, bias, mean, variance, epsilon);
 }

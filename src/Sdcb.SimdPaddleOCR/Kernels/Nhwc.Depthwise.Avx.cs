@@ -12,7 +12,7 @@ internal static unsafe partial class Nhwc
     /// [tap][c] (<see cref="PackDepthwise"/>). Interior pixels run a 2-pixel x
     /// 32-channel register block; border pixels check each tap.
     /// </summary>
-    internal static void Depthwise(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+    private static void DepthwiseAvx(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
         Span<float> output, int batch, int channels, int height, int width, int outputHeight, int outputWidth,
         int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
@@ -125,17 +125,6 @@ internal static unsafe partial class Nhwc
     // The strip is [px][block] with block = 32 (or the channel tail, stride
     // `stripStride` for the 8-wide variants). Accumulate loops carry only
     // accumulators and weights in registers.
-
-    private static void InitStrip(float* strip, float* bias, int block, int pixels)
-    {
-        if (bias == null)
-        {
-            new Span<float>(strip, pixels * block).Clear();
-            return;
-        }
-        for (int px = 0; px < pixels; px++)
-            Buffer.MemoryCopy(bias, strip + px * block, block * sizeof(float), block * sizeof(float));
-    }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static void AccumulateAllTaps32(float* inRow0, long pixelStride, long rowStride, float* wRow0, int channels,
