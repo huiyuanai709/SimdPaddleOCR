@@ -1,21 +1,13 @@
-using System.Numerics;
-using System.Runtime.Intrinsics.X86;
 using Sdcb.SimdPaddleOCR.Kernels;
 using static Sdcb.SimdPaddleOCR.UnitTests.KernelCorrectnessTests;
 
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
-/// <summary>Channels-last kernels against a scalar NCHW reference (AVX2+FMA on net10, hardware Vector on the netstandard2.0 build).</summary>
+/// <summary>Channels-last kernels against a scalar NCHW reference. Enabled when <see cref="Nhwc.Isa"/> is not scalar.</summary>
 public class NhwcKernelTests
 {
-    // The netstandard2.0 library implements the NHWC kernels with
-    // Vector<float> widths 4 and 8 (same gate as LayoutPlanner).
-#if USE_NS20_LIBRARY
-    private static bool Supported => Vector.IsHardwareAccelerated &&
-        (Vector<float>.Count == 8 || Vector<float>.Count == 4);
-#else
-    private static bool Supported => Avx2.IsSupported && Fma.IsSupported;
-#endif
+    // Same gate as LayoutPlanner: AVX-512, AVX2+FMA, or Vector widths 4/8.
+    private static bool Supported => Nhwc.Isa != NhwcIsa.Scalar;
 
     private static float[] Rand(int length, int seed, float scale = 1f)
     {

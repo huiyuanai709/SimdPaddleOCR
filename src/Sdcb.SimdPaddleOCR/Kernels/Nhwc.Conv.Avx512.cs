@@ -22,13 +22,6 @@ internal static unsafe partial class Nhwc
     /// <summary>Partial-sum floats per AVX-512 tile (8 x 16).</summary>
     private const int PartialFloats512 = TileRows512 * OcBlock;
 
-    /// <summary>
-    /// NHWC AVX-512 kernels when the ISA is present. Layout on/off is
-    /// <c>PPOCR_NHWC</c> in <see cref="OnnxSharp.LayoutPlanner"/>; process-wide
-    /// ISA is <c>DOTNET_EnableAVX512</c> via <see cref="Avx512F.IsSupported"/>.
-    /// </summary>
-    private static readonly bool UseAvx512 = Avx512F.IsSupported;
-
     // ---------------------------------------------------------------- epilogue
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -208,6 +201,14 @@ internal static unsafe partial class Nhwc
         Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
         NhwcActivation activation, float alpha, float beta, int threads)
     {
+        if ((outputChannels & 15) != 0 || outputChannels <= 0 || inputChannels <= 0)
+            throw new ArgumentException("NHWC pointwise requires output channels to be a multiple of 16.");
+        if (input.Length < (long)pixels * inputChannels || output.Length < (long)pixels * outputChannels ||
+            packedWeights.Length < (long)inputChannels * outputChannels ||
+            (!bias.IsEmpty && bias.Length < outputChannels) ||
+            (!residual.IsEmpty && residual.Length < (long)pixels * outputChannels))
+            throw new ArgumentException("NHWC pointwise buffer too small.");
+        if (pixels <= 0) return;
         int tiles = (pixels + TileRows512 - 1) / TileRows512;
         int groupTiles = Math.Max(1, PointwiseGroupTiles);
         long work = (long)pixels * inputChannels * outputChannels;
@@ -295,6 +296,21 @@ internal static unsafe partial class Nhwc
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
     {
         int taps = kernelH * kernelW;
+        if ((outputChannels & 15) != 0 || outputChannels <= 0 || inputChannels <= 0 || taps <= 0 || strideH <= 0 || strideW <= 0)
+            throw new ArgumentException("NHWC dense convolution shape is not supported.");
+        long inVolume = (long)batch * height * width * inputChannels, outVolume = (long)batch * outputHeight * outputWidth * outputChannels;
+        if (input.Length < inVolume || output.Length < outVolume ||
+            packedWeights.Length < (long)inputChannels * outputChannels * taps ||
+            (!bias.IsEmpty && bias.Length < outputChannels) || (!residual.IsEmpty && residual.Length < outVolume))
+            throw new ArgumentException("NHWC dense convolution buffer too small.");
+        if (outVolume == 0) return;
+        if (kernelH == 1 && kernelW == 1 && strideH == 1 && strideW == 1 && padTop == 0 && padLeft == 0 &&
+            outputHeight == height && outputWidth == width)
+        {
+            Pointwise512(input, packedWeights, bias, output, batch * height * width, inputChannels, outputChannels,
+                residual, activation, alpha, beta, threads);
+            return;
+        }
         int xTiles = (outputWidth + TileRows512 - 1) / TileRows512;
         int rowsTotal = batch * outputHeight;
         long work = (long)batch * outputHeight * outputWidth * outputChannels * inputChannels * taps;

@@ -12,11 +12,6 @@ namespace Sdcb.SimdPaddleOCR.Kernels;
 // transposed convolutions; the epilogue fuses residual add and activation.
 internal static unsafe partial class Nhwc
 {
-    private const int TileRows = 6;
-    private const int OcBlock = 16;
-    /// <summary>Partial-sum floats per tile (6 x 16).</summary>
-    private const int PartialFloats = TileRows * OcBlock;
-
     // ---------------------------------------------------------------- epilogue
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -214,7 +209,7 @@ internal static unsafe partial class Nhwc
     /// 1x1 convolution over <paramref name="pixels"/> NHWC pixels. Weights are
     /// packed [oc/16][ic][16] (<see cref="PackDense"/> with a 1x1 kernel).
     /// </summary>
-    internal static void Pointwise(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+    private static void PointwiseAvx(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
         Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
         NhwcActivation activation, float alpha, float beta, int threads)
     {
@@ -226,12 +221,6 @@ internal static unsafe partial class Nhwc
             (!residual.IsEmpty && residual.Length < (long)pixels * outputChannels))
             throw new ArgumentException("NHWC pointwise buffer too small.");
         if (pixels <= 0) return;
-        if (UseAvx512)
-        {
-            Pointwise512(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
-                residual, activation, alpha, beta, threads);
-            return;
-        }
         int tiles = (pixels + TileRows - 1) / TileRows;
         int groupTiles = Math.Max(1, PointwiseGroupTiles);
         long work = (long)pixels * inputChannels * outputChannels;
@@ -309,7 +298,7 @@ internal static unsafe partial class Nhwc
     /// given by the top/left pad (bottom/right follow from the output size).
     /// Weights are packed [oc/16][ic][kh*kw][16] (<see cref="PackDense"/>).
     /// </summary>
-    internal static void Dense(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+    private static void DenseAvx(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
         Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
         int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
@@ -326,14 +315,7 @@ internal static unsafe partial class Nhwc
         if (kernelH == 1 && kernelW == 1 && strideH == 1 && strideW == 1 && padTop == 0 && padLeft == 0 &&
             outputHeight == height && outputWidth == width)
         {
-            Pointwise(input, packedWeights, bias, output, batch * height * width, inputChannels, outputChannels,
-                residual, activation, alpha, beta, threads);
-            return;
-        }
-        if (UseAvx512)
-        {
-            Dense512(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
-                outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
+            PointwiseAvx(input, packedWeights, bias, output, batch * height * width, inputChannels, outputChannels,
                 residual, activation, alpha, beta, threads);
             return;
         }
@@ -464,32 +446,6 @@ internal static unsafe partial class Nhwc
         }
     }
 
-    /// <summary>Copies the receptive field at (iy0, ix0) into a zero-padded patch of kernelH x patchWidth pixels.</summary>
-    private static void GatherPatch(float* input, float* patch, int height, int width, int channels,
-        int iy0, int ix0, int kernelH, int patchWidth)
-    {
-        int rowFloats = patchWidth * channels;
-        for (int ky = 0; ky < kernelH; ky++)
-        {
-            float* dstRow = patch + ky * rowFloats;
-            int iy = iy0 + ky;
-            if ((uint)iy >= (uint)height)
-            {
-                new Span<float>(dstRow, rowFloats).Clear();
-                continue;
-            }
-            int xBegin = Math.Max(0, -ix0), xEnd = Math.Min(patchWidth, width - ix0);
-            if (xBegin > 0) new Span<float>(dstRow, xBegin * channels).Clear();
-            if (xEnd < patchWidth) new Span<float>(dstRow + Math.Max(xEnd, 0) * channels, (patchWidth - Math.Max(xEnd, 0)) * channels).Clear();
-            if (xEnd > xBegin)
-            {
-                float* src = input + ((long)iy * width + ix0 + xBegin) * channels;
-                Buffer.MemoryCopy(src, dstRow + xBegin * channels, (long)(xEnd - xBegin) * channels * sizeof(float),
-                    (long)(xEnd - xBegin) * channels * sizeof(float));
-            }
-        }
-    }
-
     // ----------------------------------------------------------- conv transpose
 
     /// <summary>
@@ -497,7 +453,7 @@ internal static unsafe partial class Nhwc
     /// (one per output tap). Weights packed [tap][oc/16][ic][16]
     /// (<see cref="PackConvTranspose2x2"/>); bias and activation fused.
     /// </summary>
-    internal static void ConvTranspose2x2Stride2(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+    private static void ConvTranspose2x2Stride2Avx(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
         Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
         NhwcActivation activation, int threads)
     {
@@ -509,7 +465,7 @@ internal static unsafe partial class Nhwc
         if (outputChannels == 1)
         {
             if (packedWeights.Length < 4L * inputChannels) throw new ArgumentException("NHWC transposed convolution weights too small.");
-            ConvTranspose2x2Stride2SingleOutput(input, packedWeights, bias, output, batch, inputChannels, height, width, activation, threads);
+            ConvTranspose2x2Stride2SingleOutputAvx(input, packedWeights, bias, output, batch, inputChannels, height, width, activation, threads);
             return;
         }
         if ((outputChannels & 15) != 0 || packedWeights.Length < 4L * inputChannels * outputChannels)
@@ -563,7 +519,7 @@ internal static unsafe partial class Nhwc
     // Single output channel (detector probability map): four dot products per
     // input pixel. Weights packed [tap][ic].
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    private static void ConvTranspose2x2Stride2SingleOutput(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights,
+    private static void ConvTranspose2x2Stride2SingleOutputAvx(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights,
         ReadOnlySpan<float> bias, Span<float> output, int batch, int inputChannels, int height, int width,
         NhwcActivation activation, int threads)
     {

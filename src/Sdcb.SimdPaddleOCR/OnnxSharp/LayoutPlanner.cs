@@ -1,8 +1,5 @@
 using System.Buffers.Binary;
-using System.Numerics;
-#if !NETSTANDARD2_0
-using System.Runtime.Intrinsics.X86;
-#endif
+using Sdcb.SimdPaddleOCR.Kernels;
 
 namespace Sdcb.SimdPaddleOCR.OnnxSharp;
 
@@ -20,23 +17,15 @@ internal static class LayoutPlanner
     public const ushort ToNhwc = 1, ToNchw = 2;
 
     /// <summary>
-    /// NHWC kernels exist for AVX2+FMA (net10) and for Vector&lt;float&gt;
-    /// widths 4 and 8 (netstandard2.0). Other ISAs keep the NCHW graph
-    /// unchanged: a Count != 4/8 Vector path would hit the scalar NHWC
-    /// fallback and lose the NCHW Vector/AdvSIMD kernels.
+    /// NHWC kernels exist for AVX-512, AVX2+FMA, and Vector&lt;float&gt;
+    /// widths 4 and 8. Other ISAs keep the NCHW graph unchanged: a Count != 4/8
+    /// Vector path would hit the scalar NHWC fallback and lose the NCHW
+    /// Vector/AdvSIMD kernels.
     /// </summary>
     public static bool IsEnabled { get; } = ComputeEnabled();
 
     private static bool ComputeEnabled()
-    {
-        if (Environment.GetEnvironmentVariable("PPOCR_NHWC") == "0") return false;
-#if NETSTANDARD2_0
-        int width = Vector<float>.Count;
-        return Vector.IsHardwareAccelerated && (width == 8 || width == 4);
-#else
-        return Avx2.IsSupported && Fma.IsSupported;
-#endif
-    }
+        => Environment.GetEnvironmentVariable("PPOCR_NHWC") != "0" && Nhwc.Isa != NhwcIsa.Scalar;
 
     public static void Apply(ref TensorRecord[] tensors, ref NodeRecord[] nodes,
         ref byte[][] tensorData, ref byte[][] nodeParameters, uint[] graphInputs, uint[] graphOutputs)

@@ -1,4 +1,3 @@
-#if NETSTANDARD2_0
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
@@ -21,7 +20,7 @@ internal static unsafe partial class Nhwc
     /// Depthwise KxK convolution, any stride/padding. Weights are packed
     /// [c/32][tap][32] (<see cref="PackDepthwise"/>).
     /// </summary>
-    internal static void Depthwise(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+    private static void DepthwiseVec(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
         Span<float> output, int batch, int channels, int height, int width, int outputHeight, int outputWidth,
         int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
@@ -181,17 +180,6 @@ internal static unsafe partial class Nhwc
     // The strip is [px][block] with block = 32 (or the channel tail, stride
     // `stripStride` for the 8-wide variants). Accumulate loops carry only
     // accumulators and weights in registers.
-
-    private static void InitStrip(float* strip, float* bias, int block, int pixels)
-    {
-        if (bias == null)
-        {
-            new Span<float>(strip, pixels * block).Clear();
-            return;
-        }
-        for (int px = 0; px < pixels; px++)
-            Buffer.MemoryCopy(bias, strip + px * block, block * sizeof(float), block * sizeof(float));
-    }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static void AccumulateAllTaps32Vec(float* inRow0, long pixelStride, long rowStride, float* wRow0, int channels,
@@ -485,5 +473,11 @@ internal static unsafe partial class Nhwc
             output[c] = ActivateScalarValue(acc, activation, alpha, beta);
         }
     }
+
+    private static void DepthwiseScalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+        Span<float> output, int batch, int channels, int height, int width, int outputHeight, int outputWidth,
+        int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
+        ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
+        => DepthwiseVec(input, packedWeights, bias, output, batch, channels, height, width, outputHeight, outputWidth,
+            kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
 }
-#endif

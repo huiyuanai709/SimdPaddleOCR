@@ -10,7 +10,7 @@ internal static unsafe partial class Nhwc
     // ------------------------------------------------------ layout conversion
 
     /// <summary>[n][c][plane] -> [n][plane][c] using 8x8 register transposes.</summary>
-    internal static void NchwToNhwc(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
+    private static void NchwToNhwcAvx(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
     {
         long volume = (long)batch * channels * plane;
         if (source.Length < volume || destination.Length < volume) throw new ArgumentException("Layout conversion buffer too small.");
@@ -37,7 +37,7 @@ internal static unsafe partial class Nhwc
     }
 
     /// <summary>[n][plane][c] -> [n][c][plane].</summary>
-    internal static void NhwcToNchw(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
+    private static void NhwcToNchwAvx(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
     {
         long volume = (long)batch * channels * plane;
         if (source.Length < volume || destination.Length < volume) throw new ArgumentException("Layout conversion buffer too small.");
@@ -116,7 +116,7 @@ internal static unsafe partial class Nhwc
     // ------------------------------------------------------------------ pooling
 
     /// <summary>Max / average pooling (average divides by the number of in-bounds taps, as the NCHW path does).</summary>
-    internal static void Pool(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
+    private static void PoolAvx(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
         int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft, bool max,
         int threads = 1)
     {
@@ -188,7 +188,7 @@ internal static unsafe partial class Nhwc
     // ------------------------------------------------------------------- resize
 
     /// <summary>Nearest-neighbour integer upsampling: each input pixel vector is repeated factorW times, each row factorH times.</summary>
-    internal static void ResizeNearest(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
+    private static void ResizeNearestAvx(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
         int factorH, int factorW, int threads = 1)
     {
         int outputWidth = width * factorW, outputHeight = height * factorH;
@@ -226,7 +226,7 @@ internal static unsafe partial class Nhwc
     // -------------------------------------------------------------- reductions
 
     /// <summary>Spatial mean per (batch, channel): output is [n][c] (== NCHW [n,c,1,1]).</summary>
-    internal static void ReduceMeanSpatial(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane)
+    private static void ReduceMeanSpatialAvx(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane)
     {
         if (input.Length < (long)batch * channels * plane || output.Length < (long)batch * channels)
             throw new ArgumentException("NHWC reduce buffer too small.");
@@ -258,7 +258,7 @@ internal static unsafe partial class Nhwc
     /// Binary op between an NHWC activation [n][plane][c] and a channel vector
     /// ([c] shared, or [n][c] when <paramref name="channelPerBatch"/>).
     /// </summary>
-    internal static void BinaryChannel<TOp>(ReadOnlySpan<float> left, ReadOnlySpan<float> channel, Span<float> output,
+    private static void BinaryChannelAvx<TOp>(ReadOnlySpan<float> left, ReadOnlySpan<float> channel, Span<float> output,
         int batch, int channels, int plane, bool channelIsLeft, bool channelPerBatch) where TOp : struct, IBinaryOp
     {
         long volume = (long)batch * plane * channels;
@@ -289,7 +289,7 @@ internal static unsafe partial class Nhwc
     }
 
     /// <summary>Inference batch-norm: (x - mean) * scale / sqrt(var + eps) + bias, per channel.</summary>
-    internal static void BatchNorm(ReadOnlySpan<float> input, Span<float> output, int pixels, int channels,
+    private static void BatchNormAvx(ReadOnlySpan<float> input, Span<float> output, int pixels, int channels,
         ReadOnlySpan<float> scale, ReadOnlySpan<float> bias, ReadOnlySpan<float> mean, ReadOnlySpan<float> variance, float epsilon)
     {
         if (input.Length < (long)pixels * channels || output.Length < (long)pixels * channels ||
