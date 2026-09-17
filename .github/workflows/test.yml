@@ -68,16 +68,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exeName = if ($IsWindows) { 'Sdcb.SimdPaddleOCR.Tests.exe' } else { 'Sdcb.SimdPaddleOCR.Tests' }
 
           # build
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r '${{ matrix.rid }}' --no-self-contained -o artifacts/net10 --nologo
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
-          $exe = Join-Path artifacts/net10 $exeName
-          if (-not $IsWindows) { chmod +x -- $exe }
+          $dll = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
 
           # run
-          & $exe --smoke --count 20 --engine sharp --workers 4 --model tiny --input dataset --case-id '${{ matrix.name }}' --out '${{ matrix.name }}-smoke.json'
+          # Host the dll with `dotnet` so macOS apphost does not need DOTNET_ROOT.
+          dotnet $dll --smoke --count 20 --engine sharp --workers 4 --model tiny --input dataset --case-id '${{ matrix.name }}' --out '${{ matrix.name }}-smoke.json'
           if ($LASTEXITCODE -ne 0) { throw "smoke failed: $LASTEXITCODE" }
       - uses: actions/upload-artifact@v7
         if: always()
@@ -102,12 +101,11 @@ jobs:
           # build
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-x64 --no-self-contained -o artifacts/net10 --nologo
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
-          $exe = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
-          chmod +x -- $exe
+          $dll = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
 
           # run
           foreach ($model in @('tiny','small','medium')) {
-            & $exe --smoke --count 20 --engine sharp --workers 4 --model $model --input dataset --case-id $model --out "model-$model-smoke.json"
+            dotnet $dll --smoke --count 20 --engine sharp --workers 4 --model $model --input dataset --case-id $model --out "model-$model-smoke.json"
             if ($LASTEXITCODE -ne 0) { throw "smoke $model failed: $LASTEXITCODE" }
           }
       - uses: actions/upload-artifact@v7
@@ -293,10 +291,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-arm64 --no-self-contained -o artifacts/ns20 --nologo -p:UseNs20Library=true
           if ($LASTEXITCODE -ne 0) { throw "dotnet build ns20 failed: $LASTEXITCODE" }
-          $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
-          $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests'
-          chmod +x -- $exeNet10
-          chmod +x -- $exeNs20
+          $dllNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
+          $dllNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests.dll'
 
           # run
           $base = 'linux-arm64'
@@ -311,7 +307,7 @@ jobs:
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
-              $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
+              $dll = if ($c.ns2) { $dllNs20 } else { $dllNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine','sharp','--workers',$c.workers,'--model',$c.model,'--input','dataset',
                 '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
@@ -325,7 +321,7 @@ jobs:
                 }
               }
               try {
-                & $exe @appArgs
+                dotnet $dll @appArgs
                 if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
               }
               finally {
@@ -381,10 +377,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r osx-arm64 --no-self-contained -o artifacts/ns20 --nologo -p:UseNs20Library=true
           if ($LASTEXITCODE -ne 0) { throw "dotnet build ns20 failed: $LASTEXITCODE" }
-          $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
-          $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests'
-          chmod +x -- $exeNet10
-          chmod +x -- $exeNs20
+          $dllNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
+          $dllNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests.dll'
 
           # run
           $base = 'osx-arm64'
@@ -397,7 +391,7 @@ jobs:
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
-              $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
+              $dll = if ($c.ns2) { $dllNs20 } else { $dllNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine','sharp','--workers',$c.workers,'--model',$c.model,'--input','dataset',
                 '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
@@ -411,7 +405,7 @@ jobs:
                 }
               }
               try {
-                & $exe @appArgs
+                dotnet $dll @appArgs
                 if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
               }
               finally {
