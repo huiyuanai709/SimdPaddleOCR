@@ -1,0 +1,109 @@
+<Window x:Class="OpenCvSharp5.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Sdcb.SimdPaddleOCR - OpenCvSharp5 WPF"
+        Width="1200"
+        Height="760"
+        MinWidth="900"
+        MinHeight="600"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="SelectImageButton"
+                    Content="选择图片"
+                    Click="SelectImage_Click" />
+            <TextBox x:Name="ImagePathText"
+                     Grid.Column="1"
+                     Margin="8,0"
+                     IsReadOnly="True" />
+            <Button x:Name="RunButton"
+                    Grid.Column="2"
+                    Content="运行 OCR"
+                    IsEnabled="False"
+                    Click="RunOcr_Click" />
+        </Grid>
+
+        <StackPanel x:Name="ModelPanel"
+                    Grid.Row="1"
+                    Margin="0,0,0,8"
+                    Orientation="Horizontal">
+            <TextBlock VerticalAlignment="Center" Text="模型：" />
+            <RadioButton x:Name="TinyRadio"
+                         Margin="8,0"
+                         VerticalAlignment="Center"
+                         Checked="Model_Checked"
+                         Content="tiny"
+                         GroupName="model" />
+            <RadioButton x:Name="SmallRadio"
+                         Margin="8,0"
+                         VerticalAlignment="Center"
+                         Checked="Model_Checked"
+                         Content="small"
+                         GroupName="model"
+                         IsChecked="True" />
+            <RadioButton x:Name="MediumRadio"
+                         Margin="8,0"
+                         VerticalAlignment="Center"
+                         Checked="Model_Checked"
+                         Content="medium"
+                         GroupName="model" />
+        </StackPanel>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0"
+                    Padding="4"
+                    BorderBrush="Gray"
+                    BorderThickness="1">
+                <Image x:Name="Preview" />
+            </Border>
+
+            <Border Grid.Column="1"
+                    Padding="8"
+                    BorderBrush="Gray"
+                    BorderThickness="1">
+                <Grid>
+                    <TextBox x:Name="Output"
+                             AcceptsReturn="True"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             FontSize="14"
+                             IsReadOnly="True"
+                             TextChanged="Output_TextChanged"
+                             TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto" />
+                    <TextBlock x:Name="OutputPlaceholder"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="Gray"
+                               IsHitTestVisible="False"
+                               Text="识别出来的文本将显示在这" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Border Grid.Row="3"
+                Margin="0,8,0,0"
+                Padding="8,5"
+                BorderBrush="LightGray"
+                BorderThickness="1">
+            <TextBlock x:Name="Status" />
+        </Border>
+    </Grid>
+</Window>

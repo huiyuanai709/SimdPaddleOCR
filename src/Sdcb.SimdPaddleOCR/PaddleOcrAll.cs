@@ -133,12 +133,12 @@ public sealed class PaddleOcrAll : IDisposable
 
     /// <summary>Runs DET, perspective crop, optional CLS and CTC REC.</summary>
     public PaddleOcrResult Run(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride = 0)
+        int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrAll));
-        if (sourceStride == 0) sourceStride = checked(sourceWidth * 3);
+        sourceStride = ImagePixels.ResolveStride(sourceWidth, sourceStride, format);
         long stageStart = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
-        PaddleOcrDetectionResult detection = _detector.Detect(source, sourceWidth, sourceHeight, sourceStride);
+        PaddleOcrDetectionResult detection = _detector.Detect(source, sourceWidth, sourceHeight, sourceStride, format);
         if (s_profileEnabled) AddProfile(0, stageStart);
         int count = detection.Boxes.Length;
         if (count == 0)
@@ -192,7 +192,7 @@ public sealed class PaddleOcrAll : IDisposable
                 {
                     PPOCRCrop.ExtractInto(source, sourceWidth, sourceHeight, sourceStride,
                         detection.Boxes[i], cropBuffer.AsSpan(cropOffsets[i], cropBytes[i]),
-                        out cropWidths[i], out cropHeights[i]);
+                        out cropWidths[i], out cropHeights[i], format);
                 }
             }
             else
@@ -217,7 +217,7 @@ public sealed class PaddleOcrAll : IDisposable
                     {
                         PPOCRCrop.ExtractInto(source, sourceWidth, sourceHeight, sourceStride,
                             detection.Boxes[i], cropBuffer.AsSpan(cropOffsets[i], cropBytes[i]),
-                            out cropWidths[i], out cropHeights[i]);
+                            out cropWidths[i], out cropHeights[i], format);
                     }
                 }
                 else
@@ -236,7 +236,7 @@ public sealed class PaddleOcrAll : IDisposable
                             List<(int Line, int Begin, int End)> jobs = bands;
                             Parallel.For(0, workers, worker =>
                                 CropBands(worker, workers, sourceAddress, sourceLength,
-                                    sourceWidth, sourceHeight, sourceStride, boxes, cropTarget,
+                                    sourceWidth, sourceHeight, sourceStride, format, boxes, cropTarget,
                                     offsets, bytes, widths, heights, jobs));
                         }
                     }
@@ -465,7 +465,8 @@ public sealed class PaddleOcrAll : IDisposable
     private const int CropRowsPerBand = 16;
 
     private static unsafe void CropBands(int first, int workers, nint sourceAddress, int sourceLength,
-        int sourceWidth, int sourceHeight, int sourceStride, PaddleOcrDetectionBox[] boxes,
+        int sourceWidth, int sourceHeight, int sourceStride, ImagePixelFormat format,
+        PaddleOcrDetectionBox[] boxes,
         byte[] cropBuffer, int[] offsets, int[] bytes, int[] widths, int[] heights,
         List<(int Line, int Begin, int End)> jobs)
     {
@@ -474,7 +475,7 @@ public sealed class PaddleOcrAll : IDisposable
         {
             (int line, int begin, int end) = jobs[job];
             PPOCRCrop.ExtractRangeInto(source, sourceWidth, sourceHeight, sourceStride,
-                boxes[line], cropBuffer.AsSpan(offsets[line], bytes[line]), begin, end);
+                boxes[line], cropBuffer.AsSpan(offsets[line], bytes[line]), begin, end, format);
             if (begin == 0)
             {
                 (int width, int height, _) = PPOCRCrop.GetSize(boxes[line]);

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using ImageSharp.AspNetCore;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
@@ -68,17 +69,18 @@ static async Task<IResult> RecognizeAsync(
     try
     {
         await using Stream stream = file.OpenReadStream();
-        using Image<Bgr24> image = await Image.LoadAsync<Bgr24>(stream, cancellationToken);
+        using Image<Rgba32> image = await Image.LoadAsync<Rgba32>(stream, cancellationToken);
         if ((long)image.Width * image.Height > OcrEngine.MaxImagePixels)
             return Results.BadRequest(new OcrError("图片像素超过上限（4000 万）。"));
 
-        byte[] bgr = new byte[checked(image.Width * image.Height * 3)];
-        image.CopyPixelDataTo(bgr);
+        if (!image.DangerousTryGetSinglePixelMemory(out Memory<Rgba32> memory))
+            return Results.BadRequest(new OcrError("图片像素不是连续内存，无法零拷贝推理。"));
         double decodeMs = stage.Elapsed.TotalMilliseconds;
 
         stage.Restart();
         PaddleOcrAll ocr = await engine.GetAsync(model);
-        PaddleOcrResult result = ocr.Run(bgr, image.Width, image.Height);
+        PaddleOcrResult result = ocr.Run(MemoryMarshal.AsBytes(memory.Span), image.Width, image.Height,
+            format: ImagePixelFormat.Rgba32);
         double ocrMs = stage.Elapsed.TotalMilliseconds;
         total.Stop();
 

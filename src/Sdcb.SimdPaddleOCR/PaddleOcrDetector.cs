@@ -5,7 +5,7 @@ using Sdcb.SimdPaddleOCR.OnnxSharp;
 
 namespace Sdcb.SimdPaddleOCR;
 
-/// <summary>Pure managed DB detector. The caller supplies packed BGR bytes.</summary>
+    /// <summary>Pure managed DB detector. The caller supplies interleaved pixels; default is BGR24.</summary>
 public sealed class PaddleOcrDetector : IDisposable
 {
     private static bool s_profileEnabled;
@@ -98,10 +98,10 @@ public sealed class PaddleOcrDetector : IDisposable
     }
 
     public PaddleOcrDetectionResult Detect(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride = 0)
+        int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrDetector));
-        if (sourceStride == 0) sourceStride = checked(sourceWidth * 3);
+        sourceStride = ImagePixels.ResolveStride(sourceWidth, sourceStride, format);
         int originalWidth = sourceWidth, originalHeight = sourceHeight;
         if ((long)sourceWidth * sourceHeight > _options.MaxImagePixels)
             throw new InvalidOperationException("Source image exceeds MaxImagePixels.");
@@ -109,20 +109,23 @@ public sealed class PaddleOcrDetector : IDisposable
         byte[]? paddedSource = null;
         if (sourceWidth + (long)sourceHeight < 64)
         {
+            int bpp = ImagePixels.BytesPerPixel(format);
             int paddedWidth = Math.Max(32, sourceWidth);
             int paddedHeight = Math.Max(32, sourceHeight);
-            paddedSource = PooledArrays.Rent<byte>(checked(paddedWidth * paddedHeight * 3));
-            Span<byte> padded = paddedSource.AsSpan(0, checked(paddedWidth * paddedHeight * 3));
+            int paddedStride = checked(paddedWidth * bpp);
+            int rowBytes = checked(sourceWidth * bpp);
+            paddedSource = PooledArrays.Rent<byte>(checked(paddedStride * paddedHeight));
+            Span<byte> padded = paddedSource.AsSpan(0, checked(paddedStride * paddedHeight));
             padded.Clear();
             for (int y = 0; y < sourceHeight; y++)
             {
-                source.Slice(y * sourceStride, checked(sourceWidth * 3))
-                    .CopyTo(padded.Slice(y * paddedWidth * 3, checked(sourceWidth * 3)));
+                source.Slice(y * sourceStride, rowBytes)
+                    .CopyTo(padded.Slice(y * paddedStride, rowBytes));
             }
             source = padded;
             sourceWidth = paddedWidth;
             sourceHeight = paddedHeight;
-            sourceStride = checked(paddedWidth * 3);
+            sourceStride = paddedStride;
         }
 
         try
@@ -136,9 +139,9 @@ public sealed class PaddleOcrDetector : IDisposable
             {
                 long started = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
                 long pipelineStarted = pipelineProfile ? PipelineProfiler.Now() : 0;
-                PPOCRPreprocess.DetBgrToNchw(source, sourceWidth, sourceHeight, sourceStride,
+                PPOCRPreprocess.Det(source, sourceWidth, sourceHeight, sourceStride,
                     size.Width, size.Height, inputSpan, session.ResizeWorkspace, _intraOpThreads,
-                    session.InputIsNhwc);
+                    session.InputIsNhwc, format);
                 if (s_profileEnabled) AddProfile(0, started);
                 if (pipelineProfile) PipelineProfiler.Add(PipelineProfiler.DetPreprocess, pipelineStarted);
                 started = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;

@@ -9,7 +9,7 @@ internal static partial class Warp
     private static unsafe void MapRowVector(byte* sourcePtr, int sourceWidth, int sourceHeight,
         int sourceStride, byte* cropPtr, int outputWidth, int unrotatedWidth, int unrotatedHeight,
         bool rotateVertical, double a, double b, double c, double d, double e, double f,
-        double g, double h, int y, double v, ref int x)
+        double g, double h, int y, double v, ref int x, PixelAccess access)
     {
         int width = Vector<double>.Count;
         Vector<double> vLane = Vector<double>.Zero;
@@ -45,19 +45,20 @@ internal static partial class Warp
                 for (int lane = 0; lane < width; lane++)
                     ProcessPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride,
                         cropPtr, outputWidth, unrotatedWidth, unrotatedHeight,
-                        rotateVertical, a, b, c, d, e, f, g, h, x + lane, y, v);
+                        rotateVertical, a, b, c, d, e, f, g, h, x + lane, y, v, access);
                 continue;
             }
             for (int lane = 0; lane < width; lane++)
                 SampleMappedPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride,
                     cropPtr, outputWidth, unrotatedHeight, rotateVertical,
-                    sx.GetElement(lane), sy.GetElement(lane), x + lane, y);
+                    sx.GetElement(lane), sy.GetElement(lane), x + lane, y, access);
         }
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void SampleCubicVector(byte* source, int stride,
-        double x, double y, int xBase, int yBase, byte* destination, int destinationOffset)
+        double x, double y, int xBase, int yBase, byte* destination, int destinationOffset,
+        PixelAccess access)
     {
         Vector<double> tap = Vector<double>.Zero;
         tap = tap.WithElement(0, xBase - 1.0).WithElement(1, xBase)
@@ -69,25 +70,26 @@ internal static partial class Warp
         Vector<double> wy = CubicWeightVector(new Vector<double>(y) - tap);
         Vector<double> wx0 = new(wx.GetElement(0)), wx1 = new(wx.GetElement(1));
         Vector<double> wx2 = new(wx.GetElement(2)), wx3 = new(wx.GetElement(3));
-        byte* row = source + (yBase - 1) * stride + (xBase - 1) * 3;
-        Vector<double> acc = AccumulateRowVector(row, wx0, wx1, wx2, wx3,
+        int bpp = access.Bpp;
+        byte* row = source + (yBase - 1) * stride + (xBase - 1) * bpp;
+        Vector<double> acc = AccumulateRowVector(row, bpp, wx0, wx1, wx2, wx3,
             new Vector<double>(wy.GetElement(0)), Vector<double>.Zero);
-        acc = AccumulateRowVector(row + stride, wx0, wx1, wx2, wx3, new Vector<double>(wy.GetElement(1)), acc);
-        acc = AccumulateRowVector(row + 2 * stride, wx0, wx1, wx2, wx3, new Vector<double>(wy.GetElement(2)), acc);
-        acc = AccumulateRowVector(row + 3 * stride, wx0, wx1, wx2, wx3, new Vector<double>(wy.GetElement(3)), acc);
+        acc = AccumulateRowVector(row + stride, bpp, wx0, wx1, wx2, wx3, new Vector<double>(wy.GetElement(1)), acc);
+        acc = AccumulateRowVector(row + 2 * stride, bpp, wx0, wx1, wx2, wx3, new Vector<double>(wy.GetElement(2)), acc);
+        acc = AccumulateRowVector(row + 3 * stride, bpp, wx0, wx1, wx2, wx3, new Vector<double>(wy.GetElement(3)), acc);
         StoreClampedRgb(destination, destinationOffset,
-            acc.GetElement(0), acc.GetElement(1), acc.GetElement(2));
+            acc.GetElement(0), acc.GetElement(1), acc.GetElement(2), access.SwapRedBlue);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe Vector<double> AccumulateRowVector(byte* row,
+    private static unsafe Vector<double> AccumulateRowVector(byte* row, int bpp,
         Vector<double> wx0, Vector<double> wx1, Vector<double> wx2, Vector<double> wx3,
         Vector<double> wy, Vector<double> acc)
     {
         acc += LoadPixelVector(row) * wx0 * wy;
-        acc += LoadPixelVector(row + 3) * wx1 * wy;
-        acc += LoadPixelVector(row + 6) * wx2 * wy;
-        acc += LoadPixelVector(row + 9) * wx3 * wy;
+        acc += LoadPixelVector(row + bpp) * wx1 * wy;
+        acc += LoadPixelVector(row + 2 * bpp) * wx2 * wy;
+        acc += LoadPixelVector(row + 3 * bpp) * wx3 * wy;
         return acc;
     }
 

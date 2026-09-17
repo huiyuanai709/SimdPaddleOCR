@@ -10,7 +10,7 @@ internal static partial class Warp
     private static unsafe void MapRowAvx512(byte* sourcePtr, int sourceWidth, int sourceHeight,
         int sourceStride, byte* cropPtr, int outputWidth, int unrotatedWidth, int unrotatedHeight,
         bool rotateVertical, double a, double b, double c, double d, double e, double f,
-        double g, double h, int y, double v, ref int x)
+        double g, double h, int y, double v, ref int x, PixelAccess access)
     {
         double* sxArr = stackalloc double[8];
         double* syArr = stackalloc double[8];
@@ -48,7 +48,7 @@ internal static partial class Warp
                 for (int lane = 0; lane < 8; lane++)
                     ProcessPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride,
                         cropPtr, outputWidth, unrotatedWidth, unrotatedHeight,
-                        rotateVertical, a, b, c, d, e, f, g, h, x + lane, y, v);
+                        rotateVertical, a, b, c, d, e, f, g, h, x + lane, y, v, access);
                 continue;
             }
             Avx512F.Store(sxArr, sx);
@@ -56,13 +56,14 @@ internal static partial class Warp
             for (int lane = 0; lane < 8; lane++)
                 SampleMappedPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride,
                     cropPtr, outputWidth, unrotatedHeight, rotateVertical,
-                    sxArr[lane], syArr[lane], x + lane, y);
+                    sxArr[lane], syArr[lane], x + lane, y, access);
         }
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void SampleCubicAvx512(byte* source, int stride,
-        double x, double y, int xBase, int yBase, byte* destination, int destinationOffset)
+        double x, double y, int xBase, int yBase, byte* destination, int destinationOffset,
+        PixelAccess access)
     {
         Vector512<double> tx = Avx512F.Subtract(Vector512.Create(x),
             Vector512.Create((double)(xBase - 1), xBase, xBase + 1, xBase + 2, 0, 0, 0, 0));
@@ -74,25 +75,26 @@ internal static partial class Warp
         Vector512<double> wx1 = Vector512.Create(wx.GetElement(1));
         Vector512<double> wx2 = Vector512.Create(wx.GetElement(2));
         Vector512<double> wx3 = Vector512.Create(wx.GetElement(3));
-        byte* row = source + (yBase - 1) * stride + (xBase - 1) * 3;
-        Vector512<double> acc = AccumulateRowAvx512(row, wx0, wx1, wx2, wx3,
+        int bpp = access.Bpp;
+        byte* row = source + (yBase - 1) * stride + (xBase - 1) * bpp;
+        Vector512<double> acc = AccumulateRowAvx512(row, bpp, wx0, wx1, wx2, wx3,
             Vector512.Create(wy.GetElement(0)), Vector512<double>.Zero);
-        acc = AccumulateRowAvx512(row + stride, wx0, wx1, wx2, wx3, Vector512.Create(wy.GetElement(1)), acc);
-        acc = AccumulateRowAvx512(row + 2 * stride, wx0, wx1, wx2, wx3, Vector512.Create(wy.GetElement(2)), acc);
-        acc = AccumulateRowAvx512(row + 3 * stride, wx0, wx1, wx2, wx3, Vector512.Create(wy.GetElement(3)), acc);
+        acc = AccumulateRowAvx512(row + stride, bpp, wx0, wx1, wx2, wx3, Vector512.Create(wy.GetElement(1)), acc);
+        acc = AccumulateRowAvx512(row + 2 * stride, bpp, wx0, wx1, wx2, wx3, Vector512.Create(wy.GetElement(2)), acc);
+        acc = AccumulateRowAvx512(row + 3 * stride, bpp, wx0, wx1, wx2, wx3, Vector512.Create(wy.GetElement(3)), acc);
         StoreClampedRgb(destination, destinationOffset,
-            acc.GetElement(0), acc.GetElement(1), acc.GetElement(2));
+            acc.GetElement(0), acc.GetElement(1), acc.GetElement(2), access.SwapRedBlue);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe Vector512<double> AccumulateRowAvx512(byte* row,
+    private static unsafe Vector512<double> AccumulateRowAvx512(byte* row, int bpp,
         Vector512<double> wx0, Vector512<double> wx1, Vector512<double> wx2, Vector512<double> wx3,
         Vector512<double> wy, Vector512<double> acc)
     {
         acc = Avx512F.Add(acc, Avx512F.Multiply(Avx512F.Multiply(LoadPixelAvx512(row), wx0), wy));
-        acc = Avx512F.Add(acc, Avx512F.Multiply(Avx512F.Multiply(LoadPixelAvx512(row + 3), wx1), wy));
-        acc = Avx512F.Add(acc, Avx512F.Multiply(Avx512F.Multiply(LoadPixelAvx512(row + 6), wx2), wy));
-        acc = Avx512F.Add(acc, Avx512F.Multiply(Avx512F.Multiply(LoadPixelAvx512(row + 9), wx3), wy));
+        acc = Avx512F.Add(acc, Avx512F.Multiply(Avx512F.Multiply(LoadPixelAvx512(row + bpp), wx1), wy));
+        acc = Avx512F.Add(acc, Avx512F.Multiply(Avx512F.Multiply(LoadPixelAvx512(row + 2 * bpp), wx2), wy));
+        acc = Avx512F.Add(acc, Avx512F.Multiply(Avx512F.Multiply(LoadPixelAvx512(row + 3 * bpp), wx3), wy));
         return acc;
     }
 

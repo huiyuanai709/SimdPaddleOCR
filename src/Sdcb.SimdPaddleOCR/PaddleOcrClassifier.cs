@@ -53,10 +53,10 @@ public sealed class PaddleOcrClassifier : IDisposable
     }
 
     public PaddleOcrClassificationResult Classify(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride = 0)
+        int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrClassifier));
-        if (sourceStride == 0) sourceStride = checked(sourceWidth * 3);
+        sourceStride = ImagePixels.ResolveStride(sourceWidth, sourceStride, format);
         if ((long)sourceWidth * sourceHeight > _options.MaxImagePixels)
             throw new InvalidOperationException("Source image exceeds MaxImagePixels.");
         bool profile = PipelineProfiler.Enabled;
@@ -67,8 +67,8 @@ public sealed class PaddleOcrClassifier : IDisposable
         {
             Span<float> input = session.InputData;
             long started = profile ? PipelineProfiler.Now() : 0;
-            int resizedWidth = PPOCRPreprocess.ClsBgrToNchw(source, sourceWidth, sourceHeight, sourceStride,
-                input, session.ResizeWorkspace, session.InputIsNhwc);
+            int resizedWidth = PPOCRPreprocess.Cls(source, sourceWidth, sourceHeight, sourceStride,
+                input, session.ResizeWorkspace, session.InputIsNhwc, format);
             if (profile) PipelineProfiler.Add(PipelineProfiler.ClsPreprocess, started);
             started = profile ? PipelineProfiler.Now() : 0;
             ReadOnlySpan<float> output = session.RunInternal(input);

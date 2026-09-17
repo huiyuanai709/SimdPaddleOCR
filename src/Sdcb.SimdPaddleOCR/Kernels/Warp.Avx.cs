@@ -10,7 +10,7 @@ internal static partial class Warp
     private static unsafe void MapRowAvx(byte* sourcePtr, int sourceWidth, int sourceHeight,
         int sourceStride, byte* cropPtr, int outputWidth, int unrotatedWidth, int unrotatedHeight,
         bool rotateVertical, double a, double b, double c, double d, double e, double f,
-        double g, double h, int y, double v, ref int x)
+        double g, double h, int y, double v, ref int x, PixelAccess access)
     {
         double* sxArr = stackalloc double[4];
         double* syArr = stackalloc double[4];
@@ -45,7 +45,7 @@ internal static partial class Warp
                 for (int lane = 0; lane < 4; lane++)
                     ProcessPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride,
                         cropPtr, outputWidth, unrotatedWidth, unrotatedHeight,
-                        rotateVertical, a, b, c, d, e, f, g, h, x + lane, y, v);
+                        rotateVertical, a, b, c, d, e, f, g, h, x + lane, y, v, access);
                 continue;
             }
             Avx.Store(sxArr, sx);
@@ -53,13 +53,14 @@ internal static partial class Warp
             for (int lane = 0; lane < 4; lane++)
                 SampleMappedPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride,
                     cropPtr, outputWidth, unrotatedHeight, rotateVertical,
-                    sxArr[lane], syArr[lane], x + lane, y);
+                    sxArr[lane], syArr[lane], x + lane, y, access);
         }
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void SampleCubicAvx(byte* source, int stride,
-        double x, double y, int xBase, int yBase, byte* destination, int destinationOffset)
+        double x, double y, int xBase, int yBase, byte* destination, int destinationOffset,
+        PixelAccess access)
     {
         Vector256<double> tx = Avx.Subtract(Vector256.Create(x),
             Vector256.Create((double)(xBase - 1), xBase, xBase + 1, xBase + 2));
@@ -69,25 +70,26 @@ internal static partial class Warp
         Vector256<double> wy = CubicWeightVectorAvx(ty);
         Vector256<double> wx0 = Avx2.Permute4x64(wx, 0x00), wx1 = Avx2.Permute4x64(wx, 0x55);
         Vector256<double> wx2 = Avx2.Permute4x64(wx, 0xAA), wx3 = Avx2.Permute4x64(wx, 0xFF);
-        byte* row = source + (yBase - 1) * stride + (xBase - 1) * 3;
-        Vector256<double> acc = AccumulateRowAvx(row, wx0, wx1, wx2, wx3,
+        int bpp = access.Bpp;
+        byte* row = source + (yBase - 1) * stride + (xBase - 1) * bpp;
+        Vector256<double> acc = AccumulateRowAvx(row, bpp, wx0, wx1, wx2, wx3,
             Avx2.Permute4x64(wy, 0x00), Vector256<double>.Zero);
-        acc = AccumulateRowAvx(row + stride, wx0, wx1, wx2, wx3, Avx2.Permute4x64(wy, 0x55), acc);
-        acc = AccumulateRowAvx(row + 2 * stride, wx0, wx1, wx2, wx3, Avx2.Permute4x64(wy, 0xAA), acc);
-        acc = AccumulateRowAvx(row + 3 * stride, wx0, wx1, wx2, wx3, Avx2.Permute4x64(wy, 0xFF), acc);
+        acc = AccumulateRowAvx(row + stride, bpp, wx0, wx1, wx2, wx3, Avx2.Permute4x64(wy, 0x55), acc);
+        acc = AccumulateRowAvx(row + 2 * stride, bpp, wx0, wx1, wx2, wx3, Avx2.Permute4x64(wy, 0xAA), acc);
+        acc = AccumulateRowAvx(row + 3 * stride, bpp, wx0, wx1, wx2, wx3, Avx2.Permute4x64(wy, 0xFF), acc);
         StoreClampedRgb(destination, destinationOffset,
-            acc.GetElement(0), acc.GetElement(1), acc.GetElement(2));
+            acc.GetElement(0), acc.GetElement(1), acc.GetElement(2), access.SwapRedBlue);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe Vector256<double> AccumulateRowAvx(byte* row,
+    private static unsafe Vector256<double> AccumulateRowAvx(byte* row, int bpp,
         Vector256<double> wx0, Vector256<double> wx1, Vector256<double> wx2, Vector256<double> wx3,
         Vector256<double> wy, Vector256<double> acc)
     {
         acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row), wx0), wy));
-        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 3), wx1), wy));
-        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 6), wx2), wy));
-        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 9), wx3), wy));
+        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + bpp), wx1), wy));
+        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 2 * bpp), wx2), wy));
+        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 3 * bpp), wx3), wy));
         return acc;
     }
 

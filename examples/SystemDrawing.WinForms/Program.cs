@@ -10,7 +10,7 @@ internal static class Program
     {
 #if NET6_0_OR_GREATER
         // Applies ApplicationHighDpiMode / ApplicationDefaultFont from the csproj so
-        // .NET 10 control metrics match .NET Framework 4.8 (Segoe UI 9pt is taller).
+        // .NET 10 uses the same YaHei UI 9pt metrics as the Designer Font on net48.
         ApplicationConfiguration.Initialize();
 #else
         Application.EnableVisualStyles();

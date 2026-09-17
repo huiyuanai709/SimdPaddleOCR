@@ -1,23 +1,17 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
-using Avalonia.Themes.Fluent;
+using Avalonia.Markup.Xaml;
 
 namespace SkiaSharp.Avalonia;
 
-internal sealed class App : Application
+public partial class App : Application
 {
-    private readonly string _imagePath;
-
-    public App(string imagePath)
-    {
-        _imagePath = imagePath;
-        Styles.Add(new FluentTheme());
-    }
+    public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
     public override void OnFrameworkInitializationCompleted()
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
-            desktop.MainWindow = new MainWindow(_imagePath);
+            desktop.MainWindow = new MainWindow(Program.StartupImagePath);
 
         base.OnFrameworkInitializationCompleted();
     }

@@ -124,10 +124,10 @@ public sealed class PaddleOcrRecognizer : IDisposable
     public int TargetWidth => _options.TargetWidth;
 
     public PaddleOcrRecognitionResult Recognize(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride = 0)
+        int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrRecognizer));
-        if (sourceStride == 0) sourceStride = checked(sourceWidth * 3);
+        sourceStride = ImagePixels.ResolveStride(sourceWidth, sourceStride, format);
         if ((long)sourceWidth * sourceHeight > _options.MaxImagePixels)
             throw new InvalidOperationException("Source image exceeds MaxImagePixels.");
         bool profile = PipelineProfiler.Enabled;
@@ -148,8 +148,8 @@ public sealed class PaddleOcrRecognizer : IDisposable
             // Reuse the request's resize scratch; safe because this request is
             // exclusively held for the duration of the call.
             long started = profile ? PipelineProfiler.Now() : 0;
-            int resizedWidth = PPOCRPreprocess.RecBgrToNchw(source, sourceWidth, sourceHeight, sourceStride,
-                targetWidth, inputSpan, session.ResizeWorkspace, session.InputIsNhwc);
+            int resizedWidth = PPOCRPreprocess.Rec(source, sourceWidth, sourceHeight, sourceStride,
+                targetWidth, inputSpan, session.ResizeWorkspace, session.InputIsNhwc, format);
             if (profile) PipelineProfiler.Add(PipelineProfiler.RecPreprocess, started);
             started = profile ? PipelineProfiler.Now() : 0;
             CtcDecodeInput decoded = RunCtcGraph(session, inputSpan);
@@ -267,7 +267,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
                 int sourceWidth = widths[line], sourceHeight = heights[line];
                 if ((long)sourceWidth * sourceHeight > _options.MaxImagePixels)
                     throw new InvalidOperationException("Source image exceeds MaxImagePixels.");
-                resizedWidths[k] = PPOCRPreprocess.RecBgrToNchw(
+                resizedWidths[k] = PPOCRPreprocess.Rec(
                     cropBuffer.AsSpan(offsets[line], cropBytes[line]), sourceWidth, sourceHeight,
                     checked(sourceWidth * 3), targetWidth,
                     input.Slice(k * sampleLength, sampleLength), session.ResizeWorkspace,

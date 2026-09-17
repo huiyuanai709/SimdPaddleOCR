@@ -6,7 +6,7 @@
 自带托管 ONNX 解释器，不依赖 Paddle Inference、ONNX Runtime 或 OpenCV 原生库。
 1.3 在 AVX2 上对连续卷积段走图级 NHWC：tiny 相对 1.2 大约快 30%，medium 在本地 5800X 上反超同机 OpenVINO，准确率不变。
 
-核心 API 只接收 BGR8 内存，不负责图片解码，因此不会强制引入 ImageSharp、SkiaSharp 或 OpenCvSharp。
+核心 API 接收交错像素内存（默认 BGR24，也可直接传 RGB24 / BGRA32 / RGBA32），不负责图片解码，因此不会强制引入 ImageSharp、SkiaSharp 或 OpenCvSharp。
 
 ## 快速开始
 
@@ -18,25 +18,26 @@ dotnet add package Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny
 dotnet add package SixLabors.ImageSharp --version 3.1.11
 ```
 
-模型从程序集嵌入资源直接加载，不会解压或写入临时文件。输入为 8-bit BGR，`stride = 0` 表示紧密排列（`width * 3`）。
+模型从程序集嵌入资源直接加载，不会解压或写入临时文件。`stride = 0` 表示紧密排列（`width *` 每像素字节数）。默认 `ImagePixelFormat.Bgr24`；其它布局在 resize / crop 里就地 swizzle，不会先转成一张中间 BGR 图。
 
 ### ImageSharp 3（推荐）
 
 ```csharp
+using System.Runtime.InteropServices;
 using Sdcb.SimdPaddleOCR;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
-
 using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default);
-using Image<Bgr24> image = await Image.LoadAsync<Bgr24>("sample.jpg");
-byte[] bgr = new byte[image.Width * image.Height * 3];
-image.CopyPixelDataTo(bgr);
-PaddleOcrResult result = ocr.Run(bgr, image.Width, image.Height);
+using Image<Rgba32> image = await Image.LoadAsync<Rgba32>("sample.jpg");
+if (!image.DangerousTryGetSinglePixelMemory(out Memory<Rgba32> memory))
+    throw new InvalidDataException("图片像素不是连续内存");
+PaddleOcrResult result = ocr.Run(MemoryMarshal.AsBytes(memory.Span), image.Width, image.Height,
+    format: ImagePixelFormat.Rgba32);
 Console.WriteLine(result.Text);
 ```
 
-后续三个示例只演示如何解码到 BGR，加载与 `Run` 与上面相同。
+后续三个示例由调用方把 lock / 原生指针包成 `ReadOnlySpan<byte>` 再交给 `Run`，加载方式与上面相同。整段 `Run` 期间不要 Unlock / Dispose 源图。
 
 ### SkiaSharp
 
@@ -45,33 +46,30 @@ using SkiaSharp;
 
 SKBitmap bitmap = SKBitmap.Decode("sample.jpg")
     ?? throw new InvalidDataException("无法读取图片");
-int stride = bitmap.Width * 3;
-byte[] bgr = new byte[stride * bitmap.Height];
-for (int y = 0; y < bitmap.Height; y++)
+if (bitmap.ColorType != SKColorType.Bgra8888)
+    bitmap = bitmap.Copy(SKColorType.Bgra8888)
+        ?? throw new InvalidDataException("无法转换到 BGRA");
+int stride = bitmap.RowBytes;
+unsafe
 {
-    for (int x = 0; x < bitmap.Width; x++)
-    {
-        SKColor color = bitmap.GetPixel(x, y);
-        int offset = y * stride + x * 3;
-        bgr[offset] = color.Blue;
-        bgr[offset + 1] = color.Green;
-        bgr[offset + 2] = color.Red;
-    }
+    PaddleOcrResult result = ocr.Run(new ReadOnlySpan<byte>((byte*)bitmap.GetPixels(), stride * bitmap.Height),
+        bitmap.Width, bitmap.Height, stride, ImagePixelFormat.Bgra32);
 }
 ```
 
 ### OpenCvSharp5
 
 ```csharp
-using System.Runtime.InteropServices;
 using OpenCvSharp;
 
 using Mat image = Cv2.ImRead("sample.jpg", ImreadModes.Color);
 if (image.Empty()) throw new InvalidDataException("无法读取图片");
-int rowBytes = image.Width * image.Channels();
-byte[] bgr = new byte[rowBytes * image.Height];
-for (int y = 0; y < image.Height; y++)
-    Marshal.Copy(IntPtr.Add(image.Data, (int)(y * image.Step())), bgr, y * rowBytes, rowBytes);
+int stride = (int)image.Step();
+unsafe
+{
+    PaddleOcrResult result = ocr.Run(new ReadOnlySpan<byte>((byte*)image.Data, stride * image.Height),
+        image.Width, image.Height, stride, ImagePixelFormat.Bgr24);
+}
 ```
 
 ### Bitmap
@@ -79,17 +77,17 @@ for (int y = 0; y < image.Height; y++)
 ```csharp
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 
 using Bitmap bitmap = new("sample.jpg");
-int stride = bitmap.Width * 3;
-byte[] bgr = new byte[stride * bitmap.Height];
 Rectangle rectangle = new(0, 0, bitmap.Width, bitmap.Height);
-BitmapData data = bitmap.LockBits(rectangle, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+BitmapData data = bitmap.LockBits(rectangle, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
 try
 {
-    for (int y = 0; y < bitmap.Height; y++)
-        Marshal.Copy(new IntPtr(data.Scan0.ToInt64() + y * (long)data.Stride), bgr, y * stride, stride);
+    unsafe
+    {
+        PaddleOcrResult result = ocr.Run(new ReadOnlySpan<byte>((byte*)data.Scan0, data.Stride * bitmap.Height),
+            bitmap.Width, bitmap.Height, data.Stride, ImagePixelFormat.Bgra32);
+    }
 }
 finally
 {

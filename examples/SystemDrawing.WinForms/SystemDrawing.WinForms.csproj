@@ -6,7 +6,9 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationHighDpiMode Condition="'$(TargetFramework)' != 'net48'">PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationDefaultFont Condition="'$(TargetFramework)' != 'net48'">Microsoft YaHei UI, 9pt</ApplicationDefaultFont>
     <AutoGenerateBindingRedirects Condition="'$(TargetFramework)' == 'net48'">true</AutoGenerateBindingRedirects>
     <ApplicationManifest Condition="'$(TargetFramework)' == 'net48'">app.manifest</ApplicationManifest>
     <PlatformTarget>x64</PlatformTarget>

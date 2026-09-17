@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using Sdcb.SimdPaddleOCR.Kernels;
 using Sdcb.SimdPaddleOCR.OnnxSharp;
 
 namespace Sdcb.SimdPaddleOCR;
@@ -71,17 +72,19 @@ internal static class PPOCRPreprocess
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    public static unsafe void DetBgrToNchw(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, int resizedWidth, int resizedHeight, Span<float> output) =>
-        DetBgrToNchw(source, sourceWidth, sourceHeight, sourceStride, resizedWidth, resizedHeight,
-            output, null);
+    public static unsafe void Det(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, int resizedWidth, int resizedHeight, Span<float> output,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24) =>
+        Det(source, sourceWidth, sourceHeight, sourceStride, resizedWidth, resizedHeight,
+            output, null, format: format);
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    internal static unsafe void DetBgrToNchw(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+    internal static unsafe void Det(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, int resizedWidth, int resizedHeight, Span<float> output,
-        ResizeWorkspace? workspace, int intraOpThreads = 1, bool nhwc = false)
+        ResizeWorkspace? workspace, int intraOpThreads = 1, bool nhwc = false,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
-        ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
+        ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         int plane = checked(resizedWidth * resizedHeight);
         if (output.Length != checked(plane * 3)) throw new ArgumentException("Invalid DET output size.");
         // PaddleOCR performs NormalizeImage after cv2.resize on an 8-bit BGR
@@ -109,7 +112,7 @@ internal static class PPOCRPreprocess
                     for (int oy = 0; oy < resizedHeight; oy++)
                         DetRow(sourcePtr, sourceStride, sourceWidth, sourceHeight, resizedWidth,
                             resizedHeight, oy, xOffsets, xCoefficients, row0, row1, outputPtr,
-                            normalizedPtr, plane, nhwc);
+                            normalizedPtr, plane, nhwc, format);
                 }
                 else
                 {
@@ -129,7 +132,7 @@ internal static class PPOCRPreprocess
                         for (int oy = worker; oy < resizedHeight; oy += workers)
                             DetRow(rowSource, sourceStride, sourceWidth, sourceHeight, resizedWidth,
                                 resizedHeight, oy, xOffsets, xCoefficients, workerRow0, workerRow1,
-                                rowOutput, rowLut, plane, nhwc);
+                                rowOutput, rowLut, plane, nhwc, format);
                     });
                 }
             }
@@ -169,16 +172,16 @@ internal static class PPOCRPreprocess
     private static unsafe void DetRow(byte* sourcePtr, int sourceStride, int sourceWidth,
         int sourceHeight, int resizedWidth, int resizedHeight, int oy, int[] xOffsets,
         short[] xCoefficients, int[] row0, int[] row1, float* outputPtr, float* normalizedPtr,
-        int plane, bool nhwc)
+        int plane, bool nhwc, ImagePixelFormat format)
     {
         GetLinearCoordinate(oy, sourceHeight, resizedHeight,
             out int sy, out short beta0, out short beta1);
         int sy0 = MathCompat.Clamp(sy, 0, sourceHeight - 1);
         int sy1 = MathCompat.Clamp(sy + 1, 0, sourceHeight - 1);
         BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy0,
-            resizedWidth, xOffsets, xCoefficients, row0);
+            resizedWidth, xOffsets, xCoefficients, row0, format);
         BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy1,
-            resizedWidth, xOffsets, xCoefficients, row1);
+            resizedWidth, xOffsets, xCoefficients, row1, format);
         int destination = oy * resizedWidth;
         for (int ox = 0; ox < resizedWidth; ox++)
         {
@@ -242,30 +245,43 @@ internal static class PPOCRPreprocess
         checked((short)Math.Round(value, MidpointRounding.ToEven));
 
     private static unsafe void BuildHorizontalRow(byte* source, int sourceStride, int sourceWidth,
-        int sourceY, int destinationWidth, int[] offsets, short[] coefficients, int[] destination)
+        int sourceY, int destinationWidth, int[] offsets, short[] coefficients, int[] destination,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         byte* row = source + sourceY * sourceStride;
-        for (int x = 0; x < destinationWidth; x++)
+        if (format == ImagePixelFormat.Bgr24)
         {
-            int sx = offsets[x], sx1 = Math.Min(sx + 1, sourceWidth - 1);
-            short coefficient0 = coefficients[x * 2], coefficient1 = coefficients[x * 2 + 1];
-            int sourceOffset = sx * 3, sourceOffset1 = sx1 * 3, destinationOffset = x * 3;
-            destination[destinationOffset] = row[sourceOffset] * coefficient0 + row[sourceOffset1] * coefficient1;
-            destination[destinationOffset + 1] = row[sourceOffset + 1] * coefficient0 + row[sourceOffset1 + 1] * coefficient1;
-            destination[destinationOffset + 2] = row[sourceOffset + 2] * coefficient0 + row[sourceOffset1 + 2] * coefficient1;
+            for (int x = 0; x < destinationWidth; x++)
+            {
+                int sx = offsets[x], sx1 = Math.Min(sx + 1, sourceWidth - 1);
+                short coefficient0 = coefficients[x * 2], coefficient1 = coefficients[x * 2 + 1];
+                int sourceOffset = sx * 3, sourceOffset1 = sx1 * 3, destinationOffset = x * 3;
+                destination[destinationOffset] = row[sourceOffset] * coefficient0 + row[sourceOffset1] * coefficient1;
+                destination[destinationOffset + 1] = row[sourceOffset + 1] * coefficient0 + row[sourceOffset1 + 1] * coefficient1;
+                destination[destinationOffset + 2] = row[sourceOffset + 2] * coefficient0 + row[sourceOffset1 + 2] * coefficient1;
+            }
+            return;
         }
+        if (format == ImagePixelFormat.Rgb24)
+        {
+            PixelRow.GatherRgb24(row, sourceWidth, destinationWidth, offsets, coefficients, destination);
+            return;
+        }
+        PixelRow.Gather32(row, sourceWidth, destinationWidth, offsets, coefficients, destination,
+            format == ImagePixelFormat.Rgba32);
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    public static unsafe int ClsBgrToNchw(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, Span<float> output) =>
-        ClsBgrToNchw(source, sourceWidth, sourceHeight, sourceStride, output, null);
+    public static unsafe int Cls(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, Span<float> output, ImagePixelFormat format = ImagePixelFormat.Bgr24) =>
+        Cls(source, sourceWidth, sourceHeight, sourceStride, output, null, format: format);
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    internal static unsafe int ClsBgrToNchw(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, Span<float> output, ResizeWorkspace? workspace, bool nhwc = false)
+    internal static unsafe int Cls(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, Span<float> output, ResizeWorkspace? workspace, bool nhwc = false,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
-        ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
+        ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         const int height = 80, width = 160;
         int plane = height * width;
         if (output.Length != 3 * plane) throw new ArgumentException("Invalid CLS output size.");
@@ -276,14 +292,15 @@ internal static class PPOCRPreprocess
         // Bilinear is per-channel, so swapping after resize matches BGR2RGB
         // before resize.
         ResizeBgrInterLinearToClsNchw(source, sourceWidth, sourceHeight, sourceStride,
-            width, height, output, workspace, nhwc);
+            width, height, output, workspace, nhwc, format);
         return width;
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void ResizeBgrInterLinearToClsNchw(ReadOnlySpan<byte> source,
         int sourceWidth, int sourceHeight, int sourceStride, int resizedWidth,
-        int resizedHeight, Span<float> output, ResizeWorkspace? workspace, bool nhwc)
+        int resizedHeight, Span<float> output, ResizeWorkspace? workspace, bool nhwc,
+        ImagePixelFormat format)
     {
         bool pooled = workspace is null;
         workspace?.Ensure(resizedWidth);
@@ -306,9 +323,9 @@ internal static class PPOCRPreprocess
                     int sy0 = MathCompat.Clamp(sy, 0, sourceHeight - 1);
                     int sy1 = MathCompat.Clamp(sy + 1, 0, sourceHeight - 1);
                     BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy0,
-                        resizedWidth, xOffsets, xCoefficients, row0);
+                        resizedWidth, xOffsets, xCoefficients, row0, format);
                     BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy1,
-                        resizedWidth, xOffsets, xCoefficients, row1);
+                        resizedWidth, xOffsets, xCoefficients, row1, format);
                     int destination = oy * resizedWidth;
                     for (int ox = 0; ox < resizedWidth; ox++)
                     {
@@ -354,15 +371,18 @@ internal static class PPOCRPreprocess
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    public static int RecBgrToNchw(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, int targetWidth, Span<float> output) =>
-        RecBgrToNchw(source, sourceWidth, sourceHeight, sourceStride, targetWidth, output, null);
+    public static int Rec(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, int targetWidth, Span<float> output,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24) =>
+        Rec(source, sourceWidth, sourceHeight, sourceStride, targetWidth, output, null,
+            format: format);
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    internal static int RecBgrToNchw(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, int targetWidth, Span<float> output, ResizeWorkspace? workspace, bool nhwc = false)
+    internal static int Rec(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, int targetWidth, Span<float> output, ResizeWorkspace? workspace, bool nhwc = false,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
-        ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
+        ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         if (targetWidth <= 0) throw new ArgumentOutOfRangeException(nameof(targetWidth));
         int height = 48;
         int plane = checked(height * targetWidth);
@@ -371,7 +391,7 @@ internal static class PPOCRPreprocess
             ((long)height * sourceWidth + sourceHeight - 1L) / sourceHeight);
         output.Clear();
         ResizeBgrInterLinearToNchw(source, sourceWidth, sourceHeight, sourceStride,
-            actualWidth, height, targetWidth, output, workspace, nhwc);
+            actualWidth, height, targetWidth, output, workspace, nhwc, format);
         return actualWidth;
     }
 
@@ -382,7 +402,8 @@ internal static class PPOCRPreprocess
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void ResizeBgrInterLinearToNchw(ReadOnlySpan<byte> source,
         int sourceWidth, int sourceHeight, int sourceStride, int resizedWidth,
-        int resizedHeight, int outputWidth, Span<float> output, ResizeWorkspace? workspace, bool nhwc)
+        int resizedHeight, int outputWidth, Span<float> output, ResizeWorkspace? workspace, bool nhwc,
+        ImagePixelFormat format)
     {
         bool pooled = workspace is null;
         workspace?.Ensure(resizedWidth);
@@ -405,9 +426,9 @@ internal static class PPOCRPreprocess
                     int sy0 = MathCompat.Clamp(sy, 0, sourceHeight - 1);
                     int sy1 = MathCompat.Clamp(sy + 1, 0, sourceHeight - 1);
                     BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy0,
-                        resizedWidth, xOffsets, xCoefficients, row0);
+                        resizedWidth, xOffsets, xCoefficients, row0, format);
                     BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy1,
-                        resizedWidth, xOffsets, xCoefficients, row1);
+                        resizedWidth, xOffsets, xCoefficients, row1, format);
                     int destination = oy * outputWidth;
                     for (int ox = 0; ox < resizedWidth; ox++)
                     {
@@ -531,12 +552,14 @@ internal static class PPOCRPreprocess
         }
     }
 
-    private static void ValidateSource(ReadOnlySpan<byte> source, int width, int height, int stride)
+    private static void ValidateSource(ReadOnlySpan<byte> source, int width, int height, int stride,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
         if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
-        if (stride < checked(width * 3)) throw new ArgumentException("Source stride is too small.");
-        long required = checked((long)(height - 1) * stride + width * 3L);
+        int bpp = ImagePixels.BytesPerPixel(format);
+        if (stride < checked(width * bpp)) throw new ArgumentException("Source stride is too small.");
+        long required = checked((long)(height - 1) * stride + width * (long)bpp);
         if (required > source.Length) throw new ArgumentException("Source buffer is too small.");
     }
 

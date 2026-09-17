@@ -18,11 +18,21 @@ internal static partial class Warp
             value2 >= 255 ? (byte)255 : checked((byte)Math.Floor(value2 + 0.5));
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static unsafe void StoreClampedRgb(byte* destination, int destinationOffset,
+        double value0, double value1, double value2, bool swapRedBlue)
+    {
+        if (swapRedBlue)
+            StoreClampedRgb(destination, destinationOffset, value2, value1, value0);
+        else
+            StoreClampedRgb(destination, destinationOffset, value0, value1, value2);
+    }
+
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     internal static unsafe void ProcessPixel(byte* sourcePtr, int sourceWidth, int sourceHeight,
         int sourceStride, byte* cropPtr, int outputWidth, int unrotatedWidth, int unrotatedHeight,
         bool rotateVertical, double a, double b, double c, double d, double e, double f,
-        double g, double h, int x, int y, double v)
+        double g, double h, int x, int y, double v, PixelAccess access = default)
     {
         double u = (double)x / unrotatedWidth;
         double denominator = g * u + h * v + 1;
@@ -36,12 +46,12 @@ internal static partial class Warp
         int destinationY = rotateVertical ? x : y;
         int destination = checked((destinationY * outputWidth + destinationX) * 3);
         SampleCubicScalar(sourcePtr, sourceWidth, sourceHeight, sourceStride,
-            sx, sy, cropPtr, destination);
+            sx, sy, cropPtr, destination, access);
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     internal static unsafe void SampleCubicScalar(byte* source, int width, int height, int stride,
-        double x, double y, byte* destination, int destinationOffset)
+        double x, double y, byte* destination, int destinationOffset, PixelAccess access = default)
     {
         int xBase = (int)Math.Floor(x), yBase = (int)Math.Floor(y);
         Span<double> xWeights =
@@ -59,13 +69,14 @@ internal static partial class Warp
             CubicWeight(y - (yBase + 2)),
         ];
         double value0 = 0, value1 = 0, value2 = 0;
+        int bpp = access.Bpp;
         if (xBase >= 1 && xBase < width - 2 && yBase >= 1 && yBase < height - 2)
         {
             for (int ky = 0; ky < 4; ky++)
             {
                 double wy = yWeights[ky];
-                int sourceOffset = (yBase + ky - 1) * stride + (xBase - 1) * 3;
-                for (int kx = 0; kx < 4; kx++, sourceOffset += 3)
+                int sourceOffset = (yBase + ky - 1) * stride + (xBase - 1) * bpp;
+                for (int kx = 0; kx < 4; kx++, sourceOffset += bpp)
                 {
                     double wx = xWeights[kx];
                     value0 += source[sourceOffset] * wx * wy;
@@ -84,14 +95,14 @@ internal static partial class Warp
                 {
                     double wx = xWeights[kx];
                     int sx = Clamp(xBase + kx - 1, width);
-                    int sourceOffset = sy * stride + sx * 3;
+                    int sourceOffset = sy * stride + sx * bpp;
                     value0 += source[sourceOffset] * wx * wy;
                     value1 += source[sourceOffset + 1] * wx * wy;
                     value2 += source[sourceOffset + 2] * wx * wy;
                 }
             }
         }
-        StoreClampedRgb(destination, destinationOffset, value0, value1, value2);
+        StoreClampedRgb(destination, destinationOffset, value0, value1, value2, access.SwapRedBlue);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

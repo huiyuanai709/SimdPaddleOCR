@@ -26,29 +26,31 @@ internal static class PPOCRCrop
     }
 
     public static byte[] Extract(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, in PaddleOcrDetectionBox box, out int outputWidth, out int outputHeight)
+        int sourceStride, in PaddleOcrDetectionBox box, out int outputWidth, out int outputHeight,
+        ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
-        ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
+        ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         (int Width, int Height, int ByteCount) size = GetSize(box);
         outputWidth = size.Width;
         outputHeight = size.Height;
         byte[] crop = new byte[size.ByteCount];
-        ExtractCore(source, sourceWidth, sourceHeight, sourceStride, box, crop, outputWidth, outputHeight);
+        ExtractCore(source, sourceWidth, sourceHeight, sourceStride, box, crop, outputWidth, outputHeight,
+            format);
         return crop;
     }
 
     public static void ExtractInto(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, in PaddleOcrDetectionBox box, Span<byte> destination, out int outputWidth,
-        out int outputHeight)
+        out int outputHeight, ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
-        ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
+        ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         (int Width, int Height, int ByteCount) size = GetSize(box);
         if (destination.Length < size.ByteCount)
             throw new ArgumentException("Destination buffer is too small.", nameof(destination));
         outputWidth = size.Width;
         outputHeight = size.Height;
         ExtractCore(source, sourceWidth, sourceHeight, sourceStride, box, destination,
-            outputWidth, outputHeight);
+            outputWidth, outputHeight, format);
     }
 
     /// <summary>
@@ -67,9 +69,9 @@ internal static class PPOCRCrop
     /// </summary>
     public static void ExtractRangeInto(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, in PaddleOcrDetectionBox box, Span<byte> destination,
-        int yBegin, int yEnd)
+        int yBegin, int yEnd, ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
-        ValidateSource(source, sourceWidth, sourceHeight, sourceStride);
+        ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         if (!TryComputePerspective(box, out PerspectiveTransform transform))
             throw new InvalidDataException("Invalid detection quadrilateral.");
         int outputWidth = transform.RotateVertical ? transform.UnrotatedHeight : transform.UnrotatedWidth;
@@ -77,17 +79,18 @@ internal static class PPOCRCrop
         if (destination.Length < checked(outputWidth * outputHeight * 3))
             throw new ArgumentException("Destination buffer is too small.", nameof(destination));
         ExtractCore(source, sourceWidth, sourceHeight, sourceStride, box, destination,
-            outputWidth, outputHeight, yBegin, yEnd);
+            outputWidth, outputHeight, format, yBegin, yEnd);
     }
 
     private static unsafe void ExtractCore(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, in PaddleOcrDetectionBox box, Span<byte> crop, int outputWidth, int outputHeight)
+        int sourceStride, in PaddleOcrDetectionBox box, Span<byte> crop, int outputWidth, int outputHeight,
+        ImagePixelFormat format)
         => ExtractCore(source, sourceWidth, sourceHeight, sourceStride, box, crop, outputWidth, outputHeight,
-            0, int.MaxValue);
+            format, 0, int.MaxValue);
 
     private static unsafe void ExtractCore(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, in PaddleOcrDetectionBox box, Span<byte> crop, int outputWidth, int outputHeight,
-        int yBegin, int yEnd)
+        ImagePixelFormat format, int yBegin, int yEnd)
     {
         if (!TryComputePerspective(box, out PerspectiveTransform transform))
             throw new InvalidDataException("Invalid perspective transform.");
@@ -95,6 +98,7 @@ internal static class PPOCRCrop
             e = transform.E, f = transform.F, g = transform.G, h = transform.H;
         int unrotatedWidth = transform.UnrotatedWidth, unrotatedHeight = transform.UnrotatedHeight;
         bool rotateVertical = transform.RotateVertical;
+        Warp.PixelAccess access = Warp.PixelAccess.Of(format);
 
         fixed (byte* sourcePtr = source)
         fixed (byte* cropPtr = crop)
@@ -104,11 +108,12 @@ internal static class PPOCRCrop
                 double v = (double)y / unrotatedHeight;
                 int x = 0;
                 Warp.MapRow(sourcePtr, sourceWidth, sourceHeight, sourceStride, cropPtr, outputWidth,
-                    unrotatedWidth, unrotatedHeight, rotateVertical, a, b, c, d, e, f, g, h, y, v, ref x);
+                    unrotatedWidth, unrotatedHeight, rotateVertical, a, b, c, d, e, f, g, h, y, v, ref x,
+                    access);
                 for (; x < unrotatedWidth; x++)
                     Warp.ProcessPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride,
                         cropPtr, outputWidth, unrotatedWidth, unrotatedHeight,
-                        rotateVertical, a, b, c, d, e, f, g, h, x, y, v);
+                        rotateVertical, a, b, c, d, e, f, g, h, x, y, v, access);
             }
         }
     }
@@ -184,12 +189,14 @@ internal static class PPOCRCrop
 
     private static double Distance(Point a, Point b) => Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
 
-    private static void ValidateSource(ReadOnlySpan<byte> source, int width, int height, int stride)
+    private static void ValidateSource(ReadOnlySpan<byte> source, int width, int height, int stride,
+        ImagePixelFormat format)
     {
         if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
         if (height <= 0) throw new ArgumentOutOfRangeException(nameof(height));
-        if (stride < checked(width * 3)) throw new ArgumentException("Source stride is too small.");
-        long required = checked((long)(height - 1) * stride + width * 3L);
+        int bpp = ImagePixels.BytesPerPixel(format);
+        if (stride < checked(width * bpp)) throw new ArgumentException("Source stride is too small.");
+        long required = checked((long)(height - 1) * stride + width * (long)bpp);
         if (required > source.Length) throw new ArgumentException("Source buffer is too small.");
     }
 }

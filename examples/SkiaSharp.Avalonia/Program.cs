@@ -6,23 +6,23 @@ namespace SkiaSharp.Avalonia;
 
 internal static class Program
 {
+    public static string StartupImagePath { get; private set; } = "";
+
     [STAThread]
     private static void Main(string[] args)
     {
         string repositoryRoot = FindRepositoryRoot();
-        string imagePath = args.Length > 0
+        StartupImagePath = args.Length > 0
             ? Path.GetFullPath(args[0])
             : Path.Combine(repositoryRoot, "examples", "sample.jpg");
 
-        BuildAvaloniaApp(imagePath).StartWithClassicDesktopLifetime(args);
+        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
-    private static AppBuilder BuildAvaloniaApp(string imagePath)
-    {
-        return AppBuilder.Configure(() => new App(imagePath))
+    public static AppBuilder BuildAvaloniaApp() =>
+        AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .LogToTrace();
-    }
 
     private static string FindRepositoryRoot()
     {
