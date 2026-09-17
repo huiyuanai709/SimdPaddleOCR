@@ -1,7 +1,4 @@
 using System.Buffers.Binary;
-#if !NETSTANDARD2_0
-using System.Runtime.Intrinsics.X86;
-#endif
 
 namespace Sdcb.SimdPaddleOCR.OnnxSharp;
 
@@ -19,21 +16,11 @@ internal static class LayoutPlanner
     public const ushort ToNhwc = 1, ToNchw = 2;
 
     /// <summary>
-    /// NHWC kernels exist for AVX-512, AVX2+FMA, AdvSIMD, Vector&lt;float&gt;
-    /// widths 4/8, and a dedicated scalar tile path. Off only when
-    /// <c>PPOCR_NHWC=0</c>.
+    /// On for every ISA that has an NHWC tile (AVX-512, AVX2+FMA, AdvSIMD,
+    /// Vector widths 4/8, scalar). Off only when <c>PPOCR_NHWC=0</c>.
     /// </summary>
-    public static bool IsEnabled { get; } = ComputeEnabled();
-
-    private static bool ComputeEnabled()
-    {
-        if (Environment.GetEnvironmentVariable("PPOCR_NHWC") == "0") return false;
-#if !NETSTANDARD2_0
-        if (Avx512F.IsSupported) return true;
-        if (Avx2.IsSupported && Fma.IsSupported) return true;
-#endif
-        return true;
-    }
+    public static bool IsEnabled { get; } =
+        Environment.GetEnvironmentVariable("PPOCR_NHWC") != "0";
 
     public static void Apply(ref TensorRecord[] tensors, ref NodeRecord[] nodes,
         ref byte[][] tensorData, ref byte[][] nodeParameters, uint[] graphInputs, uint[] graphOutputs)
