@@ -399,6 +399,15 @@ internal static partial class SimdKernels
         return AdvSimd.Or(result, sign);
     }
 
+    /// <summary>One 128-bit vector of <see cref="Gelu"/>: same operation order as the AdvSIMD Gelu loop.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Vector128<float> GeluVectorAdvSimd(Vector128<float> value)
+    {
+        Vector128<float> activated = AdvSimd.Add(
+            ErfVectorAdvSimd(AdvSimd.Multiply(value, SseInvSqrtTwo)), SseOne);
+        return AdvSimd.Multiply(AdvSimd.Multiply(value, activated), SseHalf);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<float> ErfPolySmallAdvSimd(Vector128<float> a, Vector128<float> s)
     {

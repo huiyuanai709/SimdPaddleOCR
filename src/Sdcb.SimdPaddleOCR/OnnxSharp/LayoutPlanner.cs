@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 #if !NETSTANDARD2_0
-using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 #endif
 
@@ -20,10 +19,9 @@ internal static class LayoutPlanner
     public const ushort ToNhwc = 1, ToNchw = 2;
 
     /// <summary>
-    /// NHWC kernels exist for AVX-512, AVX2+FMA, Vector&lt;float&gt; widths
-    /// 4/8, and a dedicated scalar tile path. net10 ARM stays NCHW — AdvSIMD
-    /// measured faster than the Count==4 NHWC Vector path (linux-arm64 tiny-4w
-    /// ~230 vs ~286). ns2 ARM still opens NHWC (no AdvSIMD NCHW kernels).
+    /// NHWC kernels exist for AVX-512, AVX2+FMA, AdvSIMD, Vector&lt;float&gt;
+    /// widths 4/8, and a dedicated scalar tile path. Off only when
+    /// <c>PPOCR_NHWC=0</c>.
     /// </summary>
     public static bool IsEnabled { get; } = ComputeEnabled();
 
@@ -33,7 +31,6 @@ internal static class LayoutPlanner
 #if !NETSTANDARD2_0
         if (Avx512F.IsSupported) return true;
         if (Avx2.IsSupported && Fma.IsSupported) return true;
-        if (AdvSimd.IsSupported) return false;
 #endif
         return true;
     }

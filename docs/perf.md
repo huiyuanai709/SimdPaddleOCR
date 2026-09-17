@@ -2,7 +2,7 @@
 
 ## 1.4（未发布）
 
-把 NHWC 扩到 ns2、无 HW intrinsic 的 x64（专用 scalar tile），以及图输入直接标 NHWC；net10 AdvSIMD 与 `PPOCR_NHWC=0` 仍是 NCHW。公开 `InferenceSession.Run` 仍收逻辑 NCHW，入口自动转置。下面 1.3 本机表和 CI 表仍是 `37fe1fd` 的数，不要当成 1.4。
+把 NHWC 扩到 ns2、无 HW intrinsic 的 x64（专用 scalar tile）、net10 AdvSIMD（手写 tile），以及图输入直接标 NHWC；`PPOCR_NHWC=0` 仍关。公开 `InferenceSession.Run` 仍收逻辑 NCHW，入口自动转置。下面 1.3 本机表和 CI 表仍是 `37fe1fd` 的数，不要当成 1.4。
 
 ## 1.3（2026-09-14）
 
