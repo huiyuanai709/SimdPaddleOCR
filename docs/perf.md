@@ -1,308 +1,178 @@
 # Sdcb.SimdPaddleOCR 性能基准
 
-## 1.4（未发布）
+## 1.4（`b784d28`，2026-09-17）
 
-把 NHWC 扩到 ns2、无 HW intrinsic 的 x64（专用 scalar tile）、net10 AdvSIMD（手写 tile），以及图输入直接标 NHWC；`PPOCR_NHWC=0` 仍关。公开 `InferenceSession.Run` 仍收逻辑 NCHW，入口自动转置。下面 1.3 本机表和 1.3 CI 表仍是 `37fe1fd` 的数，不要当成 1.4。
+相对 **1.3.0**（`37fe1fd`），图级 NHWC 从「仅 AVX2+FMA」扩到：
 
-### CI linux-arm64 N2（手写 NHWC AdvSIMD）
+| 路径                                        | 1.3                    | 1.4                                                                                |
+| ------------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------- |
+| net10 AVX2+FMA                              | 图级 NHWC              | 同左；预处理直接写 NHWC，少一次输入 `LayoutConvert`                                |
+| `netstandard2.0`（`tiny-4w-ns2`，`Vector`） | NCHW                   | **NHWC**                                                                           |
+| x64 `DOTNET_EnableHWIntrinsic=0`（scalar）  | NCHW + 软件模拟 Vector | **专用 NHWC 标量 tile**（不再转 `*Vec`）                                           |
+| net10 AdvSIMD（linux-arm64 / osx-arm64）    | NCHW                   | **手写 NHWC NEON tile**                                                            |
+| 公开 `InferenceSession.Run`                 | 逻辑 NCHW              | 仍收逻辑 NCHW；图输入已标 NHWC 时入口自动转置                                      |
+| 像素格式                                    | 只认紧排 BGR           | 默认仍 `Bgr24`；RGB24 / BGRA32 / RGBA32 在 resize / warp 就地 gather，不摊中间 BGR |
 
-旧结论（NCHW AdvSIMD vs NHWC `Vector` Count==4）是 tiny-4w ~230 vs ~286，所以当时默认关闸。手写 NEON tile 之后，N2 上已经翻过来。
+`PPOCR_NHWC=0` 仍可整图关回 NCHW。正确率不变。CI 不再跑 OpenVINO.NET。
 
-| 来源 | 提交 | 布局 |
-| --- | --- | --- |
-| [35212321161](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35212321161) | `6a2a649` | net10 ARM 仍 NCHW AdvSIMD |
-| [35215170283](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35215170283) | `2f16ff5` | 默认开 NHWC + 手写 AdvSIMD tile |
+**内存占用大幅下降。** tiny-4w 工作集峰值大约少 **300 MB**：win-x64 7763 **817 → 515 MB**，linux-arm64 N2 **840 → 572 MB**；跑图 Δ WS 从约 400 MB 降到约 100–160 MB。主要是 NHWC workspace 别名，以及预处理直接写 NHWC、不再为输入 `LayoutConvert` 留第二份缓冲。
 
-6 replica 中位 ms/图，CER 都是 757/1022：
+### 怎么读
 
-| 用例 | 旧 NCHW | 本分支 | 相对 |
-| --- | ---: | ---: | ---: |
-| linux-arm64 `tiny-4w` | ~227 | **175–184**（约 179） | **0.79×** |
-| `tiny-4w-ns2` | ~298 | ~295–302 | 持平（ns2 仍走 Vector） |
-| `tiny-4w-scalar` | ~857 | ~850–869 | 持平 |
+- **墙钟**是去掉首张 warmup 后的 **median ms/图**（bench 99 张，smoke 19 张）。
+- 每个 replica 是一台独立的 GitHub-hosted VM。先在单 replica 内算比值，再只汇总 **同一 CPU**。
+- GitHub `windows-2025` 会随机分到 EPYC 7763 / 9V74 / Xeon。**7763 没有 AVX-512**；9V74 / Xeon 有时走 AVX-512。这两类绝对时间不可比。
+- 4 worker 下算子会并行重叠，**之和可以大于墙钟**，只适合看结构。
+- 1.2 旧基线已从本文删除。相对 1.2 的数字见当时的 1.3 说明：AVX2 tiny 约 0.69×，本机 medium 约 0.43×。
 
-## 1.3（2026-09-14）
+### 数据来源
 
-核心包 **1.3.0**（`37fe1fd`）只在 **AVX2+FMA** 上对连续卷积段走图级 NHWC；当时 ns2 / ARM / `PPOCR_NHWC=0` 仍是 NCHW。
+| 版本       | Actions                                                                       | 提交      | 说明                                          |
+| ---------- | ----------------------------------------------------------------------------- | --------- | --------------------------------------------- |
+| **1.3.0**  | [34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921) | `37fe1fd` | 只 AVX2 NHWC；ns2 / ARM / scalar 仍 NCHW      |
+| **1.4**    | [35241030966](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35241030966) | `b784d28` | 全路径 NHWC + 像素格式；下文「1.4」默认指这次 |
+| 1.4 前一次 | [35217602432](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35217602432) | `67cf1fa` | 内核已是 1.4；用来给 win-x64 7763 补样本      |
 
-### 本机引擎对比（tiny / small / medium）
+数据集、模型、预解码 BGR、ISA 开关、runner 规格与以前相同：`.github/workflows/test.yml`，`dataset/` 固定种子合成 100 张 JPG。库 TFM 默认 `net10.0`；`tiny-4w-ns2` 把库编成 `netstandard2.0`，仍跑在 .NET 10 上。
 
-机器：Windows，AMD Ryzen 7 5800X（16 逻辑核），AVX2。数据集：仓库 `dataset/` 100 张合成 JPG，预解码 BGR，第 1 张 warmup，统计 n=99。4 个行级 worker，DET 长边 960。
-
-| 引擎 | 版本 |
-| --- | --- |
-| **sharp** | 本库 1.3.0（`37fe1fd`），`net10.0` |
-| **c** | [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) **`20d0de6`**（2026-09-14，CMake `0.2.0`）。本机 VS 2026 + Ninja 编 `lw_ppocr_c.dll`，`LW_EXPERIMENTAL_AVX2_FMA_DISPATCH=ON`。tiny 走正式转换器；small/medium LWM 走仓库里的 experimental dynamic 转换器。字典：tiny 用 `ppocrv6-tiny/ppocr_keys.txt`，small/medium 用 `PP-OCRv6_small_rec_dict.txt`。 |
-| **openvino** | `Sdcb.OpenVINO.PaddleOCR` 0.8.1 + `Sdcb.OpenVINO.runtime.win-x64` 2026.2.0 |
-
-墙钟是 mean ms/图（括号里是 median / p95）。相对时间以同行 **sharp=1.00**。这不是 CI replica，不要和后文 1.2 / 1.3 CI 中位毫秒硬接。
-
-| 模型 | 引擎 | mean (median / p95) | 相对 sharp | exact_lines | CER | WS peak |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| tiny | sharp | **87.8** (82.5 / 136) | **1.00** | 734/1026 | **2.71%** | 803 MB |
-| tiny | openvino | 132.3 (128.7 / 182) | 1.51 | 644/1026 | 3.55% | 2785 MB |
-| tiny | c | 185.8 (184.5 / 246) | 2.12 | 744/1026 | 4.01% | **539 MB** |
-| small | sharp | **237.5** (239.6 / 313) | **1.00** | **940/1026** | **0.61%** | 1211 MB |
-| small | openvino | 299.6 (295.2 / 401) | 1.26 | 722/1026 | 2.30% | 3239 MB |
-| small | c | 541.6 (540.6 / 688) | 2.28 | 926/1026 | 1.09% | **759 MB** |
-| medium | sharp | **640.5** (647.9 / 846) | **1.00** | 992/1026 | 0.68% | 2430 MB |
-| medium | openvino | 1077 (1063 / 1395) | 1.68 | 810/1026 | 1.74% | 4516 MB |
-| medium | c | 2193 (2208 / 2801) | 3.42 | **1004/1026** | **0.24%** | **1481 MB** |
-
-读法：
-
-- **速度**：三档都是 sharp 最快，openvino 其次，c 最慢。c/sharp 约 2.1×（tiny）、2.3×（small）、3.4×（medium）。
-- **准确率**：tiny / small 是 sharp CER 最好；只有 medium 是 c 更好（0.24% vs 0.68%）。openvino 三档 CER 都差一截，行精确也最低。
-- **内存**：c 最省，openvino 最肥（tiny 已近 2.8 GB，medium 4.5 GB）。small 1w/4w 的 loaded / Δ WS / peak，以及为什么 c 涨得少、哪些不能无损搬到本库：[`small_memory_vs_c.md`](small_memory_vs_c.md)。
-- c 没有对外 profiler，上表没有 `det_graph` / `lines_wall`。
-
-JSON：`bench-out/csharp-tiny-4w.json`、`csharp-small-4w.json`、`v13-medium-4w-rerun.json`；`c-tiny-4w.json`、`c-small-4w.json`、`c-medium-4w.json`；`openvino-*-4w-local.json`。
-
-相对正式标签 **1.2.0**（`764dbd2`）同机 medium 4w：sharp 从 1507 ms 降到 641 ms（约 **0.43×**，吞吐 2.3×），CER 仍 0.68%（992/1026）。
-
-### CI（tiny 4w，同一 CPU）
-
-不要和上一张本机表的绝对毫秒混加。
-
-| 来源 | 提交 | 说明 |
-| --- | --- | --- |
-| [34303303418](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34303303418) | `764dbd2` | **1.2.0** |
-| [34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921) | `37fe1fd` | **1.3.0**（NHWC） |
-
-| 场景 | 1.2 | 1.3 | 相对时间 |
-| --- | ---: | ---: | ---: |
-| win-x64 EPYC 7763 AVX2，tiny 4w | 232 ms / peak 786 MB | **160 ms** / peak 817 MB | **0.69** |
-| 同上，强制 `noavx512` | 220 ms | **152 ms** | **0.69** |
-| win-x64 ns2（无 NHWC） | 361 ms | 343 ms | 0.95 |
-| linux-arm64 N2，tiny 4w（无 NHWC） | 273 ms | **241 ms** | 0.88 |
-| 同 replica OpenVINO / 本库 | 0.96 | **1.38** | 本库反超 |
-
-上表 CI 数字来自 `34818949921`，当时 c 还是 **2026-09-05** 的 `lw_ppocr_c.dll`。测试现已改为下载 [`lw_ppocr_c.20260914.20d0de6.dll`](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)（与本机表同一份），落盘名仍是 `lw_ppocr_c.dll`。下次引擎套件的 c/sharp 比值不要再用 1.76–1.93。
-
-1.3 回归阈值（替换文末 1.2 那三条）：
-
-1. **x64**：EPYC 7763 SIMD `tiny-4w` 中位应在约 **155–175 ms**；ns2 同 replica 比值大约 **2.0–2.2**。
-2. **ARM64**：N2 `tiny-4w` 应在约 **235–245 ms**。
-3. **引擎**：同 replica 上 OpenVINO / sharp 4w 应在 **1.35–1.41**。c 已钉到 `20d0de6`，c/sharp 比值等新 CI 再定。后续 CI 不再跑 OpenVINO.NET，这条只解释当时测到的比值。
+主基线仍是 **win-x64 + EPYC 7763 + AVX2** 和 **linux-arm64 Neoverse N2**（`CPU part 0xd49`，6 replica 几乎一条直线）。osx-arm64 是 3 核 / 7 GB 虚拟 M1，只看同 replica 比值。
 
 ---
 
-## 1.2 历史基线（2026-09）
+## 1.4 vs 1.3：各路径
 
-以下到文末是 **1.2** 的 CI 综合基线：4 次 GitHub Actions `test` 工作流、共 **484** 份 JSON。数字不要当 1.3 的回归门禁。
-之后对比性能时，请按「同一 CPU 型号 + 同一有效 ISA + 同一套件」对照，不要把不同 runner 的绝对毫秒数混在一起。
+正确率两边都是 sharp **757/1022、CER 3.53%**（含 scalar、ns2、全部 ISA）；c 仍是 759/1022、4.18%。smoke：tiny 152/208，small 188/208，medium 200/208。
 
-## 怎么读
+### linux-arm64 N2（最稳，6 replica）
 
-- **墙钟**是去掉首张 warmup 后、99 张图（bench）或 19 张图（smoke）的 **median ms/图**。
-- 每个 replica 跑在 **一台独立的 GitHub-hosted VM** 上。先在单 replica 内算比值，再对比值或同 CPU 的 median 做汇总。
-- 表中「中位」是各 replica median 的中位数；「IQR」是这些 replica median 的 25%–75%；「范围」是最小–最大；`n` 是 replica 数。
-- GitHub `windows-2025` 会随机分到 AMD EPYC 7763 / 9V74 或 Intel Xeon。**7763 没有 AVX-512**，9V74 / Xeon 有时暴露 AVX-512、有时只走到 AVX2。这两类绝对时间不可比。
-- 算子耗时（Conv / Conv1x1 / MatMul 等）是每张图该算子的均值。4 worker 下算子会并行重叠，**之和可以大于墙钟**，只适合看结构，不适合当吞吐。
+1.3 是 NCHW AdvSIMD；1.4 是手写 NHWC NEON。同一 `ubuntu-24.04-arm`、同一 `0xd49`。
 
-## 数据来源
+| 用例             | 1.3 中位 | 1.4 中位 |      相对 | 1.3 同 replica 比 | 1.4 同 replica 比 |
+| ---------------- | -------: | -------: | --------: | ----------------: | ----------------: |
+| `tiny-4w`        |  **241** |  **180** | **0.75×** |              1.00 |              1.00 |
+| `tiny-1w`        |      390 |  **291** | **0.75×** |              1.63 |              1.65 |
+| `tiny-4w-ns2`    |      374 |  **295** | **0.79×** |              1.55 |              1.66 |
+| `tiny-4w-scalar` |      984 |  **856** | **0.87×** |              4.16 |              4.75 |
 
-| Actions run | 提交 | 时间（UTC） | 说明 |
-| --- | --- | --- | --- |
-| [34239354155](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34239354155) | `6812806` | 2026-09-08 14:36 | 内核与注释已落地；osx-arm64 当时 6 replica |
-| [34239766768](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34239766768) | `32cb921` | 2026-09-08 14:40 | osx-arm64 改为 5 replica（GitHub Pro macOS 并发上限） |
-| [34291744223](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34291744223) | `32cb921` | 2026-09-08 23:41 | 同提交复跑 |
-| [34293010903](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34293010903) | `32cb921` | 2026-09-08 23:58 | 同提交复跑 |
+读法：
 
-`6812806` 与 `32cb921` 的 SIMD 内核相同，只差 macOS replica 数量，因此一并纳入。
-两次复跑之间 runner 上的 .NET 补丁从 **10.0.11** 升到 **10.0.12**，同 CPU 墙钟没有可分辨的台阶。
+- net10 AdvSIMD 是 1.4 最大的平台级收益：4w / 1w 都大约快 **25%**。
+- ns2 在 ARM 上仍走 `Vector`（128-bit），没有手写 tile，但也吃到预处理直写 NHWC，大约快 **21%**。
+- scalar 有专用 NHWC tile，大约快 **13%**。相对 4w 的倍数从 4.16 升到 4.75，是因为 4w 自己更快了，不是 scalar 变慢。
+- 1.3 曾用 NCHW AdvSIMD vs NHWC `Vector` Count==4（约 230 vs 286）决定默认关闸；手写 NEON 之后已经翻过来。
 
-Replica 配置（`32cb921`）：
+工作集（`tiny-4w`）：peak **840 → 572 MB**，Δ WS **418 → 162 MB**。NHWC packed workspace + 别名，不是测法变了。
 
-| Job | Runner | Replica |
-| --- | --- | --- |
-| `bench-win-x64-simd` | `windows-2025` | 6 |
-| `bench-win-x64-engines` | `windows-2025` | 6 |
-| `bench-linux-arm64` | `ubuntu-24.04-arm` | 6 |
-| `bench-osx-arm64` | `macos-26` | 5 |
-| `smoke-platform` / `smoke-models` | 见下表 | 每平台 1 |
+### win-x64 SIMD（只报 EPYC 7763）
 
-4 次合计：win-x64 SIMD 24 replica、win-x64 引擎 24 replica、linux-arm64 24 replica、osx-arm64 21 replica（第一次多 1 个）。
+1.3 这次 run 有 3 份 7763；1.4 最新 run 也是 3 份（另 3 份落到 Xeon / 9V74）。中位是各 replica median 的中位数。
 
-## 测试方法
+| 用例               | 有效 ISA      | 1.3 中位 |      1.4 中位（范围） |          相对 | 1.3 同 replica 比 | 1.4 同 replica 比 |
+| ------------------ | ------------- | -------- | --------------------: | ------------: | ----------------: | ----------------: |
+| `tiny-4w`          | AVX2          | **167**  |    **184**（183–221） | ~1.1×（噪声） |              1.00 |              1.00 |
+| `tiny-4w-noavx512` | AVX2          | 152      |    **140**（136–156） |         0.92× |              0.89 |              0.76 |
+| `tiny-4w-noavx2`   | AVX           | 307      |    **328**（327–331） |         1.07× |              1.75 |              1.75 |
+| `tiny-4w-noavx`    | Vector        | 481      |    **380**（376–390） |     **0.79×** |              2.76 |              2.00 |
+| `tiny-4w-ns2`      | Vector / NHWC | **343**  |    **228**（220–229） |     **0.66×** |          **2.02** |          **1.24** |
+| `tiny-4w-scalar`   | scalar        | 1368     | **1220**（1199–1278） |     **0.89×** |               7.7 |               6.3 |
 
-- **数据集**：`test/Sdcb.SimdPaddleOCR.TestData` 用固定种子 `20260830` 生成的 100 张合成 JPG（中英混合、多字号、旋转与背景变化）。Bench 跑全量，第 1 张 warmup；smoke 只取前 20 张。
-- **模型**：默认 PP-OCRv6 **tiny** + TextLineOrientation CLS；`smoke-models` 另跑 small / medium。
-- **输入**：8-bit BGR 紧排内存，不计 JPEG 解码。
-- **运行时**：.NET 10，库 TFM 默认 `net10.0`；`tiny-4w-ns2` 把库编成 `netstandard2.0`，仍跑在 .NET 10 上（走 `System.Numerics.Vector`）。
-- **ISA 开关**：`DOTNET_EnableAVX512` / `AVX2` / `AVX` / `EnableHWIntrinsic`。
-- **引擎**（后两者只在 win-x64 引擎套件里比；**没有**和 PaddleOCR 官方实现做对比）：
-  - `sharp` = 本库 Sdcb.SimdPaddleOCR
-  - `c` = [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) 的 **2026 年 8 月底**一份构建（`lw_ppocr_c.dll`），**不代表**该项目最新版本
-  - `openvino` = 同作者的 [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET)（当时 CI 是 `Sdcb.OpenVINO.PaddleOCR` 0.8.1 + `Sdcb.OpenVINO.runtime.win-x64` 2026.2.0；后续套件已去掉，不再新测）
+读法：
 
-## 环境
+- **AVX2 默认路径和 1.3 持平。** SIMD job 连续跑 6 个 case，7763 单次 183–221 都见过；引擎套件同机 4w 反而从 154 降到 142（见下）。不要用一份 221 喊回归。
+- **ns2 是 x64 上 1.4 最大的收益**：343 → 228（约 **1.5×** 吞吐）。1.3 的 ns2 仍是 NCHW Vector，和关掉 AVX2 几乎同级（比值 ~2.0）；1.4 走到 NHWC，比值掉到 **1.24**。
+- **noavx**（只留 `Vector`）同样吃到 NHWC：481 → 380（**0.79×**）。
+- **scalar** 换成专用 16 路寄存器累加 tile，不再走软件模拟 Vector：1368 → 1220（**0.89×**）。本机 small-4w、`count=5`、`HWIntrinsic=0` 从 1750 降到 1237（约 **1.42×**），和 CI tiny 同方向、幅度更大（small 的 generic conv 更吃 NHWC）。
+- `noavx512` 在 7763 上本来就没有 AVX-512，和 `tiny-4w` 同 ISA；两边差值是噪声地板。
+- `noavx2`（只留 AVX）没有单独的 NHWC AVX tile，墙钟和 1.3 重叠。
 
-所有 GitHub-hosted runner 都是 **4 逻辑核**（osx-arm64 为 **3**），内存约 16 GB（osx-arm64 约 7 GB）。这是共享云主机，不是安静实验室。
+并入 [35217602432](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35217602432) 的 4 份 7763 之后，1.4 `tiny-4w` 中位约 **191**（n=7，范围 183–221），ns2 仍是 221–241。结论不变。
 
-| RID | Actions runner | 实测 OS | 出现过的 CPU | 有效 ISA | 内存 |
-| --- | --- | --- | --- | --- | --- |
-| win-x64 | `windows-2025` | Windows 10.0.26100 | **AMD EPYC 7763**（主基线） | AVX2（无 AVX-512） | 16 GB |
-| win-x64 | 同上 | 同上 | AMD EPYC 9V74 | AVX2 或 AVX-512 | 16 GB |
-| win-x64 | 同上 | 同上 | Xeon Platinum 8370C / 8573C、Xeon 6973P-C | 多为 AVX-512 | 16 GB |
-| win-x86 | `windows-2025`（x86 SDK） | 同上 | 7763 或 9V74 | AVX2 / AVX-512 | 16 GB |
-| win-arm64 | `windows-11-arm` | Windows 10.0.26200 | Cobalt 100 | AdvSimd | 16 GB |
-| linux-x64 | `ubuntu-24.04` | Ubuntu 24.04.4/5 | 7763 或 9V74 | AVX2 / AVX-512 | ~16 GB |
-| linux-arm64 | `ubuntu-24.04-arm` | Ubuntu 24.04.4/5 | **Neoverse N2**（`CPU part 0xd49`） | AdvSimd | ~16 GB |
-| osx-arm64 | `macos-26` | macOS 26.6.2 | **Apple M1 (Virtual)** | AdvSimd | 7 GB |
-| osx-x64 | `macos-26-intel` | macOS 26.6.1 | i7-8700B @ 3.20 GHz | AVX2 | 14 GB |
+工作集（7763 `tiny-4w`）：peak **817 → 515 MB**，Δ WS **398 → 107 MB**。
 
-主基线选 **win-x64 + EPYC 7763 + AVX2**：样本最多（SIMD 17、引擎 13），IQR 窄，且不会和 AVX-512 缠在一起。
+### win-x64 引擎套件（只报 EPYC 7763）
 
-## 正确率
+和 SIMD job 不是同一台 VM，绝对毫秒不要和上一张表硬接。1.3 CI 的 c 还不是 `20d0de6`；1.4 已钉到 [`lw_ppocr_c.20260914.20d0de6.dll`](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)。1.4 不再跑 OpenVINO.NET。
 
-同一套合成数据上，本库跨 OS / CPU / ISA（含 scalar、ns2）的识别结果一致。
+| 用例            | 1.3 中位 | 1.4 中位 |         相对 | 1.3 vs sharp 4w | 1.4 vs sharp 4w |
+| --------------- | -------: | -------: | -----------: | --------------: | --------------: |
+| sharp `tiny-4w` |      154 |  **142** |        0.92× |            1.00 |            1.00 |
+| sharp `tiny-1w` |      217 |  **200** |        0.92× |            1.41 |            1.41 |
+| c `tiny-4w`     |      288 |      254 | （c 换 DLL） |            1.82 |        **1.76** |
+| c `tiny-1w`     |      496 |      360 | （c 换 DLL） |            3.10 |            2.43 |
+| OpenVINO.NET 4w |      216 |        — | 已从 CI 去掉 |        **1.38** |               — |
 
-| 套件 | 引擎 | 模型 | 行精确 | CER | 说明 |
-| --- | --- | --- | --- | --- | --- |
-| bench（99 张） | sharp（本库） | tiny | **757/1022** | **3.53%** | 全部 4 次、全部平台相同 |
-| bench | lw.PPOCR.C | tiny | 759/1022 | 4.18% | 行精确略高，CER 略差 |
-| bench | OpenVINO.NET | tiny | 698/1022（常见） | 3.63% | 个别 Xeon 主机落到 677–680/1022 |
-| smoke（19 张） | sharp | tiny | 152/208 | 3.67% | 全部平台相同 |
-| smoke | sharp | small | 188/208 | 1.57% | linux-x64 |
-| smoke | sharp | medium | 200/208 | 0.34% | linux-x64 |
+1.3 同 replica OpenVINO / sharp 是 **1.38**（本库反超）；这条只解释历史，不再新测。1.4 c/sharp 约 **1.7×**，c 更省内存（peak ~535 MB vs sharp ~513 MB）。
 
-## 主基线：win-x64 AVX2（EPYC 7763）
+### osx-arm64（高噪声，只看比值）
 
-### SIMD / ISA 套件
+虚拟 M1、3 逻辑核、7 GB。绝对毫秒 replica 之间可以差一倍，**不能**拿单次墙钟下结论。
 
-同一 replica 内以 `tiny-4w`（net10 + AVX2）为 1.00x。下表绝对时间只含 **7763**。
+| 用例             | 1.3 同 replica 比 | 1.4 同 replica 比 |
+| ---------------- | ----------------: | ----------------: |
+| `tiny-4w`        |              1.00 |              1.00 |
+| `tiny-1w`        |              ~1.9 |              ~2.1 |
+| `tiny-4w-ns2`    |              1.20 |          **1.67** |
+| `tiny-4w-scalar` |              4.08 |              4.39 |
 
-| 用例 | 有效 ISA | 中位 ms/图 | IQR | 范围 | n | 同 replica 比值 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `tiny-4w` | AVX2 | **237.6** | 233.9–241.9 | 230.0–285.3 | 17 | 1.00 |
-| `tiny-4w-noavx512` | AVX2 | 223.8 | 221.6–232.8 | 216.1–268.8 | 17 | **0.95**（7763 无 AVX-512，与基线同 ISA） |
-| `tiny-4w-ns2` | AVX2（Vector） | **373.4** | 366.4–376.0 | 355.7–408.0 | 17 | **1.56** |
-| `tiny-4w-noavx2` | AVX | 360.2 | 357.5–369.7 | 351.7–454.8 | 17 | **1.53** |
-| `tiny-4w-noavx` | Vector128 | 493.5 | 490.3–509.9 | 481.2–548.3 | 17 | **2.10** |
-| `tiny-4w-scalar` | scalar | 1536.5 | 1502–1563 | 1467–1729 | 17 | **6.51** |
+1.4 的 4w 自己变快之后，ns2（仍是 Vector）相对倍数会被拉开，和 linux-arm64 同一现象。正确率仍是 757/1022。只用来确认 AdvSIMD 路径能跑。
 
-读数：
+### 本机 5800X（AVX2，4 worker，n=99）
 
-- 默认 AVX2 大约 **4.2 图/秒**（4 worker，含 DET+CLS+REC）。
-- `noavx512` 比 `tiny-4w` 快约 5%，是同 ISA 的噪声地板，**不是** AVX-512 收益。
-- ns2 比 net10 AVX2 慢 **56%**，和关掉 AVX2、只留 AVX 几乎同级。
-- 关掉全部硬件加速大约慢 **6.5 倍**。
+1.3.0 正式表（含当时同机 OpenVINO / c）。1.4 本机只重测了本库；OpenVINO / c 数字仍是 1.3 那次，不要当成 1.4 新测。
 
-EPYC 9V74 上同一套件、有效 ISA 仍为 AVX2 时，`tiny-4w` 中位 **240.9 ms**（n=5），与 7763 相差约 1%，可作交叉验证。
-这 4 次 SIMD 套件里，9V74 的默认用例都没有走到 AVX-512。
+| 模型   | 引擎                 |  1.3 mean |              1.4 mean |              相对 |   exact_lines |       CER |
+| ------ | -------------------- | --------: | --------------------: | ----------------: | ------------: | --------: |
+| tiny   | 本库 net10 AVX2      |  **87.8** | （本次未重测，见 CI） |                 — |      734/1026 |     2.71% |
+| tiny   | 本库 ns2             |         — |              **98.7** |                 — |      734/1026 |     2.71% |
+| small  | 本库                 | **237.5** |             **203.9** |         **0.86×** |      940/1026 |     0.61% |
+| medium | 本库                 | **640.5** |               **564** |         **0.88×** |      992/1026 |     0.68% |
+| tiny   | OpenVINO.NET         |       132 |                     — | 1.51 vs 1.3 sharp |      644/1026 |     3.55% |
+| tiny   | lw.PPOCR.C `20d0de6` |       186 |                     — | 2.12 vs 1.3 sharp |      744/1026 |     4.01% |
+| medium | OpenVINO.NET         |      1077 |                     — | 1.68 vs 1.3 sharp |      810/1026 |     1.74% |
+| medium | lw.PPOCR.C `20d0de6` |      2193 |                     — | 3.42 vs 1.3 sharp | **1004/1026** | **0.24%** |
 
-### 引擎对比套件（必须同机）
+1.4 本机 JSON：`bench-out/ab-stash/base-small-4w.json`、`bench-out/recheck2-medium-4w.json`、`bench-out/ab-stash/base-tiny-4w-ns2.json`。stash A/B（`67cf1fa` vs 像素格式）正确率逐行 0 差异，墙钟约 3%，是 `rec_graph` 噪声。
 
-引擎 job 与 SIMD job 是不同 VM，绝对毫秒不要和上一张表硬接。下面只报 **7763** 上、以同 replica 的 `tiny-4w` sharp 为 1.00x。
+### 平台 smoke（20 张，只看覆盖）
 
-| 用例 | 引擎 | worker | 中位 ms/图 | IQR | n | 相对 sharp 4w |
-| --- | --- | --- | --- | --- | --- | --- |
-| `tiny-4w` | sharp | 4 | **224.2** | 222.3–229.0 | 13 | 1.00 |
-| `tiny-1w` | sharp | 1 | 275.8 | 274.8–280.1 | 13 | 1.23 |
-| `tiny-c-4w` | lw.PPOCR.C | 4 | 280.5 | 278.9–284.4 | 13 | **1.26** |
-| `tiny-c-1w` | lw.PPOCR.C | 1 | 485.4 | 481.8–495.8 | 13 | 2.18 |
-| `tiny-openvino` | OpenVINO.NET | 4 | 213.7 | 209.8–216.8 | 13 | **0.95** |
+median **不能**和 100 张 bench 比。CPU 每次都会变。1.4 [35241030966](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35241030966) 行精确与 1.3 相同。
 
-结论（7763 / AVX2）：
+| RID              | 1.4 这次 CPU | ISA     | 中位 ms |  行精确 |
+| ---------------- | ------------ | ------- | ------: | ------: |
+| linux-arm64      | N2           | AdvSimd |     227 | 152/208 |
+| linux-x64 tiny   | 7763         | AVX2    | 324–352 | 152/208 |
+| linux-x64 small  | 7763         | AVX2    |     958 | 188/208 |
+| linux-x64 medium | 7763         | AVX2    |    5200 | 200/208 |
+| win-x64          | 9V45         | AVX-512 |     138 | 152/208 |
+| win-x86          | 9V74         | AVX2    |     406 | 152/208 |
+| win-arm64        | Cobalt 100   | AdvSimd |     213 | 152/208 |
+| osx-arm64        | M1 Virtual   | AdvSimd |     324 | 152/208 |
+| osx-x64          | i7-8700B     | AVX2    |     217 | 152/208 |
 
-- 本库 4 worker 比 lw.PPOCR.C 4 worker **快约 26%**（对方是 1.26x 墙钟）。
-- 本库 1→4 worker 大约再快 23%；lw.PPOCR.C 的 4 worker 收益更大（485→281），但绝对时间仍慢于本库。
-- OpenVINO.NET 墙钟略快（约 5%），但工作集约 **2600 MB**，本库约 **790 MB**（约 1/3）。OpenVINO.NET 有一个 279 ms 的离群 replica，P95 可到 752 ms。
+small 大约是 tiny 的 3 倍墙钟，medium 大约是 tiny 的 15–17 倍；CER 从 3.7% → 1.6% → 0.34%。
 
-AVX-512 主机样本少，只作参考：9V74 AVX-512 上 sharp 4w 中位 160 ms（n=3），OpenVINO.NET 130 ms，lw.PPOCR.C 231 ms；Xeon 6973P-C 上 sharp 151 ms、OpenVINO.NET 129 ms（各 n=2）。数量不够当基线。
+---
 
-### 算子结构（7763 / SIMD / tiny-4w）
+## 1.4 工作集（大幅下降）
 
-| 项 | 中位（ms/图，算子均值） | IQR | n |
-| --- | --- | --- | --- |
-| Conv（合计） | 358 | 351–365 | 17 |
-| Conv1x1 | 226 | 222–231 | 17 |
-| Conv3x3Stride2 | 35 | 34–37 | 17 |
-| Depthwise3x3 | 26 | 26–27 | 17 |
-| MatMul | 30 | 29–31 | 17 |
-| Erf | 36 | 35–36 | 17 |
-| WS peak | 789 MB | 779–793 | 17 |
+| 场景                         | 1.3 peak |    1.4 peak | 1.4 Δ WS |
+| ---------------------------- | -------: | ----------: | -------: |
+| win-x64 7763 sharp tiny 4w   |  ~817 MB | **~515 MB** |  ~107 MB |
+| linux-arm64 N2 sharp tiny 4w |  ~840 MB | **~572 MB** |  ~162 MB |
+| osx-arm64 sharp tiny 4w      |  ~715 MB |     ~704 MB |  ~289 MB |
+| win-x64 lw.PPOCR.C tiny 4w   |  ~586 MB |     ~535 MB |  ~105 MB |
 
-Conv1x1 仍是最大单项。ns2 上 Conv1x1 升到约 235 ms，但 **Stride2 从 35 ms 升到 75 ms**、MatMul/Erf 大约翻倍，墙钟差距主要来自这些 net10 专化路径而不是 Conv1x1 单独崩掉。
+x64 / ARM64 本库 peak 大约少 **300 MB**，主要是 NHWC workspace 别名和不再为输入 `LayoutConvert` 留第二份缓冲。c 仍然更省，但更慢。OpenVINO.NET 1.3 时 tiny 已近 2.6 GB，不再新测。
 
-## linux-arm64 AdvSimd（Neoverse N2）
+像素格式不增加整图缓冲：gather 写的是已经要做的双线性 / cubic BGR scratch。
 
-`ubuntu-24.04-arm` 在这 4 次里 **全部**是 `CPU part 0xd49`，24 replica 的墙钟几乎一条直线，是最稳的平台。
-
-| 用例 | 有效 ISA | 中位 ms/图 | IQR | 范围 | n | 同 replica 比值 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `tiny-4w` | AdvSimd | **272.8** | 271.9–273.7 | 265.4–281.0 | 24 | 1.00 |
-| `tiny-1w` | AdvSimd | 398.5 | 394.4–401.0 | 390.3–407.5 | 24 | **1.46** |
-| `tiny-4w-ns2` | AdvSimd | 420.2 | 418.9–425.5 | 414.2–428.4 | 24 | **1.54** |
-| `tiny-4w-scalar` | scalar | 1159 | 1158–1163 | 1150–1178 | 24 | **4.25** |
-
-4 worker 相对 1 worker 稳稳快 46%。ns2 慢 54%，和 win-x64 ns2 的 56% 同量级。
-scalar 只慢 4.25 倍（win-x64 是 6.5 倍），因为 ARM 上 `Vector<float>` 本身就是 128-bit，和 x64 AVX2→scalar 的落差不同。
-
-算子（`tiny-4w`）：Conv1x1 176 ms，Stride2 19 ms，MatMul 71 ms，Erf 61 ms。相对 x64，MatMul/Erf 更突出。
-
-## osx-arm64 AdvSimd（Apple M1 Virtual）
-
-`macos-26` 是 3 逻辑核、7 GB 的虚拟 M1，**replica 之间可以差一倍**，不能拿单次墙钟下结论。
-
-| 用例 | 中位 ms/图 | IQR | 范围 | n |
-| --- | --- | --- | --- | --- |
-| `tiny-4w` | 336 | 302–384 | 223–484 | 21 |
-| `tiny-1w` | 534 | 499–646 | 359–756 | 21 |
-| `tiny-4w-ns2` | 502 | 405–544 | 303–683 | 21 |
-| `tiny-4w-scalar` | 1396 | 1230–1621 | 1021–1814 | 21 |
-
-同 replica 比值（相对 `tiny-4w`）比绝对时间稳一些：ns2 大约 1.3–1.5x，scalar 大约 3–5x，但离散仍明显大于 N2 / 7763。
-这份基线把 osx-arm64 标成 **高噪声平台**，只用于确认 AdvSimd 路径能跑、正确率一致，不用于回归判定。
-
-## 平台 smoke（20 张，仅供覆盖）
-
-smoke 图集是 bench 的前 20 张，median **不能**和 100 张 bench 直接比。每平台 4 次各 1 条，CPU 还会变。
-
-| RID | CPU（本次出现） | ISA | 中位 ms/图 | 行精确 |
-| --- | --- | --- | --- | --- |
-| win-x64 | EPYC 7763 | AVX2 | 272（n=3） | 152/208 |
-| win-x64 | Xeon Platinum | AVX-512 | 295（n=1） | 152/208 |
-| win-x86 | 7763 / 9V74 | AVX2 | 418–443（各 n=1） | 152/208 |
-| win-x86 | 9V74 | AVX-512 | 390（n=2） | 152/208 |
-| win-arm64 | Cobalt 100 | AdvSimd | 315（n=4） | 152/208 |
-| linux-x64 | EPYC 7763 | AVX2 | 277–286 | 152/208 |
-| linux-x64 | EPYC 9V74 | AVX-512 | 192（n=2） | 152/208 |
-| linux-arm64 | Neoverse N2 | AdvSimd | 323（n=4） | 152/208 |
-| osx-arm64 | Apple M1 | AdvSimd | 369（n=4，334–400） | 152/208 |
-| osx-x64 | i7-8700B | AVX2 | 883（n=4，252–1081，噪声极大） | 152/208 |
-
-linux-x64 模型档位（9V74 AVX2 与 7763 AVX2 分开；**不要**和 AVX-512 tiny smoke 的 192 ms 比模型差距）：
-
-| 模型 | CPU | ISA | 中位 ms/图 | 行精确 | CER |
-| --- | --- | --- | --- | --- | --- |
-| tiny | 7763 | AVX2 | 277 | 152/208 | 3.67% |
-| small | 7763 | AVX2 | 836 | 188/208 | 1.57% |
-| medium | 7763 | AVX2 | 4724 | 200/208 | 0.34% |
-| tiny | 9V74 | AVX2 | 281 | 152/208 | 3.67% |
-| small | 9V74 | AVX2 | 853 | 188/208 | 1.57% |
-| medium | 9V74 | AVX2 | 5162 | 200/208 | 0.34% |
-
-small 大约是 tiny 的 3 倍墙钟，medium 大约是 tiny 的 17 倍；正确率按 CER 从 3.7% → 1.6% → 0.34%。
-
-## 工作集
-
-| 场景 | WS peak 中位 | 备注 |
-| --- | --- | --- |
-| win-x64 sharp tiny 4w（bench） | ~790 MB | 7763 / 9V74 接近 |
-| win-x64 sharp tiny 1w | ~730 MB | |
-| win-x64 lw.PPOCR.C tiny 4w | ~586 MB | 更省，但更慢 |
-| win-x64 OpenVINO.NET tiny | ~2600 MB | 约 3 倍于本库 |
-| linux-arm64 sharp tiny 4w | ~847 MB | |
-| osx-arm64 sharp tiny 4w | ~726 MB | 机器内存只有 7 GB |
-| 各平台 tiny smoke（20 张） | 330–390 MB | |
+---
 
 ## 以后怎么用这份基线
 
-1. **回归判定（x64）**：只看 win-x64 **EPYC 7763** 的 SIMD 套件。`tiny-4w` 中位应落在约 **234–242 ms**（IQR）；`tiny-4w-ns2` 同 replica 比值应在 **1.51–1.61**。单次 230–285 都出现过，不要用单 replica 绝对时间喊回归。
-2. **回归判定（ARM64）**：只看 linux-arm64 N2。`tiny-4w` 应在 **272–274 ms**（IQR）；ns2 比值 **1.53–1.56**。这个平台比 Windows 更适合做自动阈值。
-3. **引擎对比**：只用 win-x64 引擎套件、同一 replica。sharp 4w vs lw.PPOCR.C 4w 应在 **1.25–1.27**；1.2 当时 vs OpenVINO.NET 为 **0.94–0.98**（忽略个别 OpenVINO.NET 长尾）。后续 CI 不再跑 OpenVINO.NET。
-4. **不要**：把 9V74/Xeon 的 AVX-512 160 ms 和 7763 的 238 ms 写成「优化了 30%」；不要用 osx-arm64 / osx-x64 的绝对时间做 CI 门禁；不要拿 20 张 smoke 和 100 张 bench 比快慢。
+1. **回归判定（x64）**：只看 win-x64 **EPYC 7763** 的 SIMD 套件。`tiny-4w` 中位大约 **180–210 ms**；`tiny-4w-ns2` 同 replica 比值大约 **1.02–1.30**。单次 180–221 都出现过，不要用一份 replica 绝对时间喊回归。
+2. **回归判定（ARM64）**：只看 linux-arm64 N2。`tiny-4w` 应在 **175–185 ms**；ns2 比值 **1.63–1.68**。这个平台比 Windows 更适合做自动阈值。
+3. **引擎对比**：只用 win-x64 引擎套件、同一 replica。c/sharp 4w 大约 **1.67–1.80**（`20d0de6`）。不要再和 OpenVINO.NET 比新数。
+4. **不要**：把 9V74/Xeon 的 AVX-512 和 7763 的 AVX2 写成「优化了 30%」；不要用 osx-arm64 / osx-x64 的绝对时间做门禁；不要拿 20 张 smoke 和 100 张 bench 比快慢。
 
 复现：推送或手动触发 [`.github/workflows/test.yml`](../.github/workflows/test.yml)，下载 `perf-report` artifact。本地同一套数据可用 `test/Sdcb.SimdPaddleOCR.Tests` 的 `--benchmark` / `--summarize`。

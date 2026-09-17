@@ -2,9 +2,9 @@
 
 **中文** | [English](README_EN.md)
 
-纯 C# PP-OCRv6 推理库：多平台 SIMD 优化、较低内存占用、高正确率。
+纯 C# PP-OCRv6 推理库：多平台 SIMD 优化、内存占用低、高正确率。
 自带托管 ONNX 解释器，不依赖 Paddle Inference、ONNX Runtime 或 OpenCV 原生库。
-1.3 在 AVX2 上对连续卷积段走图级 NHWC：tiny 相对 1.2 大约快 30%，medium 在本地 5800X 上反超同机 OpenVINO，准确率不变。
+1.4 把图级 NHWC 扩到 ns2、x64 scalar 和 net10 AdvSIMD，内存占用更低，准确率不变。
 
 核心 API 接收交错像素内存（默认 BGR24，也可直接传 RGB24 / BGRA32 / RGBA32），不负责图片解码，因此不会强制引入 ImageSharp、SkiaSharp 或 OpenCvSharp。
 
@@ -97,14 +97,14 @@ finally
 
 ## NuGet 包
 
-| NuGet 包 | 版本 | 说明 |
-| --- | --- | --- |
-| `Sdcb.SimdPaddleOCR` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR) | 纯托管推理核心（`net10.0;netstandard2.0`） |
-| `Sdcb.SimdPaddleOCR.ModelProvider` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.ModelProvider.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.ModelProvider) | 模型契约（`IPaddleOcrModelProvider` / `PaddleOcrModelBundle`），通常被传递引用 |
-| `Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny) | PP-OCRv6 tiny DET+REC+字典；`ChineseV6TinyModels.Default` 含 CLS |
-| `Sdcb.SimdPaddleOCR.Models.ChineseV6Small` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small) | PP-OCRv6 small；`ChineseV6SmallModels.Default` |
-| `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium) | PP-OCRv6 medium；`ChineseV6MediumModels.Default` |
-| `Sdcb.SimdPaddleOCR.Models.TextLineOrientation` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.TextLineOrientation.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.TextLineOrientation) | PP-LCNet 文本行方向 CLS，被三个中文模型包传递引用 |
+| NuGet 包                                        | 版本                                                                                                                                                                       | 说明                                                                           |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `Sdcb.SimdPaddleOCR`                            | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR)                                                       | 纯托管推理核心（`net10.0;netstandard2.0`）                                     |
+| `Sdcb.SimdPaddleOCR.ModelProvider`              | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.ModelProvider.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.ModelProvider)                           | 模型契约（`IPaddleOcrModelProvider` / `PaddleOcrModelBundle`），通常被传递引用 |
+| `Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny`       | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny)             | PP-OCRv6 tiny DET+REC+字典；`ChineseV6TinyModels.Default` 含 CLS               |
+| `Sdcb.SimdPaddleOCR.Models.ChineseV6Small`      | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small)           | PP-OCRv6 small；`ChineseV6SmallModels.Default`                                 |
+| `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium)         | PP-OCRv6 medium；`ChineseV6MediumModels.Default`                               |
+| `Sdcb.SimdPaddleOCR.Models.TextLineOrientation` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.TextLineOrientation.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.TextLineOrientation) | PP-LCNet 文本行方向 CLS，被三个中文模型包传递引用                              |
 
 每个 `IPaddleOcrModelProvider` 提供 `Name`、`Kind`、`Format`、语言和版本元数据以及 `OpenRead()` / `OpenReadAsync()`。完整 OCR 组合由 `PaddleOcrModelBundle` 表达（DET、REC、字典和可选 CLS）。当前语言代码为 `zh`。单个模型也可被其他推理实现消费，例如 `ChineseV6TinyModel.Detection.OpenReadAsync()`。`Model`、`PaddleOcrDetector`、`PaddleOcrClassifier`、`PaddleOcrRecognizer` 和 `PaddleOcrAll` 均提供 Stream 加载入口；解析完成后不会继续保留完整的 ONNX 原始字节。
 
@@ -170,16 +170,16 @@ x64 发布 Native AOT 时，可执行项目里**必须**设置：
 
 ## 支持范围
 
-| | 说明 |
-| --- | --- |
-| 目标框架 | 核心 `net10.0;netstandard2.0`；`ModelProvider` 与全部模型包为 `netstandard2.0` |
-| 推荐运行时 | .NET 10：完整 x86 SIMD 与 NativeAOT（`IsAotCompatible`） |
+|            | 说明                                                                                                                        |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 目标框架   | 核心 `net10.0;netstandard2.0`；`ModelProvider` 与全部模型包为 `netstandard2.0`                                              |
+| 推荐运行时 | .NET 10：完整 x86 SIMD 与 NativeAOT（`IsAotCompatible`）                                                                    |
 | 兼容运行时 | `netstandard2.0` 可在 .NET Framework 4.8 等环境使用；编译时去掉 AVX / AVX-512 / VNNI 源，走 `System.Numerics.Vector` / 标量 |
-| CI 架构 | Windows x64 / x86 / ARM64，Linux x64 / ARM64，macOS x64 / ARM64 |
-| SIMD | .NET 10 运行时探测 AVX → AVX2 → AVX-512 / VNNI；无对应指令集或 ARM 时用 Vector/标量 |
-| 输入 | 8-bit BGR 内存；无图片路径、文件或图片库 API |
-| 设备 | CPU only，无 GPU |
-| NativeAOT | 裁剪发布时请保留核心程序集和所用模型程序集 |
+| CI 架构    | Windows x64 / x86 / ARM64，Linux x64 / ARM64，macOS x64 / ARM64                                                             |
+| SIMD       | .NET 10 运行时探测 AVX → AVX2 → AVX-512 / VNNI；无对应指令集或 ARM 时用 Vector/标量                                         |
+| 输入       | 交错像素内存（默认 BGR24，也可 RGB24 / BGRA32 / RGBA32）；无图片路径、文件或图片库 API                                      |
+| 设备       | CPU only，无 GPU                                                                                                            |
+| NativeAOT  | 裁剪发布时请保留核心程序集和所用模型程序集                                                                                  |
 
 ## 许可证与第三方组件
 
@@ -199,31 +199,24 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 
 ## 性能
 
-**1.3**：AVX2 上连续卷积段走图级 NHWC。CI 数字来自
-[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921)，只报同一 CPU。
+**1.4** 相对 **1.3.0**：图级 NHWC 从仅 AVX2 扩到 ns2 / x64 scalar / net10 AdvSIMD，预处理直接写 NHWC。
+**内存占用大幅下降**：tiny-4w 工作集峰值大约少 **300 MB**（win-x64 817→**515 MB**，linux-arm64 840→**572 MB**），Δ WS 从约 400 MB 降到约 100–160 MB。
+正确率不变（tiny bench 757/1022，CER 3.53%）。
 
 GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 
-| 平台 | CPU | ISA | 中位 ms/图 | 工作集峰值 | 相对 1.2 |
-| --- | --- | --- | ---: | ---: | ---: |
-| win-x64 | AMD EPYC 7763（4 vCPU） | AVX2 | **160** | ~817 MB | **0.69×**（1.2 为 232 ms / ~786 MB） |
-| win-x64 `netstandard2.0` | 同上 | AVX2（`Vector`，无 NHWC） | 343 | ~775 MB | 0.95× |
-| linux-arm64 | Neoverse N2 | AdvSimd（无 NHWC） | **241** | ~840 MB | 0.88× |
+| 路径                                      |     1.3 |      1.4 |         相对 |       工作集峰值 |
+| ----------------------------------------- | ------: | -------: | -----------: | ---------------: |
+| linux-arm64 N2 `tiny-4w`（net10 AdvSIMD） |     241 |  **180** |    **0.75×** | 840 → **572 MB** |
+| linux-arm64 `tiny-4w-ns2`                 |     374 |  **295** |    **0.79×** |                  |
+| linux-arm64 `tiny-4w-scalar`              |     984 |  **856** |    **0.87×** |                  |
+| win-x64 7763 `tiny-4w`（AVX2）            |     167 |     ~184 | 持平（噪声） | 817 → **515 MB** |
+| win-x64 7763 `tiny-4w-ns2`                | **343** |  **228** |    **0.66×** |                  |
+| win-x64 7763 `tiny-4w-noavx`              |     481 |  **380** |    **0.79×** |                  |
+| win-x64 7763 `tiny-4w-scalar`             |    1368 | **1220** |    **0.89×** |                  |
 
-1.2 时同 replica OpenVINO / 本库是 0.96；1.3 为 **1.38**（本库反超）。
-
-本机引擎对比（Ryzen 7 5800X，4 worker，仓库 `dataset/` 100 张，n=99）。c 为 [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) **`20d0de6`**（[2026-09-14 DLL](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)）。墙钟是 mean ms/图。
-
-| 模型 | 引擎 | mean ms/图 | 相对本库 | 行精确 | CER | 工作集峰值 |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| tiny | 本库 | **87.8** | **1.00** | 734/1026 | **2.71%** | 803 MB |
-| tiny | [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | 132 | 1.51 | 644/1026 | 3.55% | 2785 MB |
-| tiny | lw.PPOCR.C | 186 | 2.12 | 744/1026 | 4.01% | **539 MB** |
-| medium | 本库 | **641** | **1.00** | 992/1026 | 0.68% | 2430 MB |
-| medium | OpenVINO.NET | 1077 | 1.68 | 810/1026 | 1.74% | 4516 MB |
-| medium | lw.PPOCR.C | 2193 | 3.42 | **1004/1026** | **0.24%** | **1481 MB** |
-
-medium 相对本库 1.2.0 同机 4w：1507 → **641 ms**（约 0.43×），CER 仍 0.68%。small 和读数规则见 [`docs/perf.md`](docs/perf.md)。
+本机 Ryzen 7 5800X、4 worker、仓库 `dataset/` 100 张（n=99）本库 mean：small **237.5 → 204 ms**（0.86×），medium **641 → 564 ms**（0.88×）。
+1.3 同机 OpenVINO / c 以及各 ISA 比值见 [`docs/perf.md`](docs/perf.md)。
 
 ## 性能复现
 

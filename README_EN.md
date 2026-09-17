@@ -2,9 +2,9 @@
 
 [中文](README.md) | **English**
 
-Pure C# PP-OCRv6 inference library: multi-platform SIMD, relatively low memory use, and high accuracy.
+Pure C# PP-OCRv6 inference library: multi-platform SIMD, low memory use, and high accuracy.
 It ships a managed ONNX interpreter and does not depend on Paddle Inference, ONNX Runtime, or OpenCV native libraries.
-1.3 runs contiguous convolution segments channels-last (graph-level NHWC) on AVX2: roughly 30% faster than 1.2 on tiny, and locally faster than same-machine OpenVINO on medium, with unchanged accuracy.
+1.4 extends graph-level NHWC to ns2, x64 scalar, and net10 AdvSIMD, with lower memory use and unchanged accuracy.
 
 The core API accepts interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 are also first-class). It does not decode images, so ImageSharp, SkiaSharp, or OpenCvSharp are not required.
 
@@ -177,7 +177,7 @@ Without it, ILC targets the SSE2 / 128-bit `Vector<T>` baseline, `Avx2.IsSupport
 | Compatible runtime | `netstandard2.0` can run on .NET Framework 4.8 and similar; AVX / AVX-512 / VNNI sources are excluded at compile time, falling back to `System.Numerics.Vector` / scalar |
 | CI architectures | Windows x64 / x86 / ARM64, Linux x64 / ARM64, macOS x64 / ARM64 |
 | SIMD | .NET 10 probes AVX → AVX2 → AVX-512 / VNNI at runtime; Vector/scalar when those ISAs are missing or on ARM |
-| Input | 8-bit BGR memory; no image path, file, or image-library API |
+| Input | Interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 also accepted); no image path, file, or image-library API |
 | Device | CPU only, no GPU |
 | NativeAOT | Keep the core assembly and the model assemblies you use when publishing trimmed |
 
@@ -199,31 +199,24 @@ respective owners. This project is not official and does not imply endorsement.
 
 ## Performance
 
-**1.3**: graph-level NHWC on AVX2 for contiguous convolution segments. CI numbers from
-[34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921), same CPU only.
+**1.4** vs **1.3.0**: graph-level NHWC now covers ns2 / x64 scalar / net10 AdvSIMD, and preprocess writes NHWC directly.
+**Memory dropped sharply**: tiny-4w working-set peak is about **300 MB** lower (win-x64 817→**515 MB**, linux-arm64 840→**572 MB**); Δ WS fell from ~400 MB to ~100–160 MB.
+Accuracy is unchanged (tiny bench 757/1022, CER 3.53%).
 
 Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
 
-| Platform | CPU | ISA | Median ms/image | WS peak | vs 1.2 |
-| --- | --- | --- | ---: | ---: | ---: |
-| win-x64 | AMD EPYC 7763 (4 vCPU) | AVX2 | **160** | ~817 MB | **0.69×** (1.2: 232 ms / ~786 MB) |
-| win-x64 `netstandard2.0` | same | AVX2 (`Vector`, no NHWC) | 343 | ~775 MB | 0.95× |
-| linux-arm64 | Neoverse N2 | AdvSimd (no NHWC) | **241** | ~840 MB | 0.88× |
+| Path | 1.3 | 1.4 | vs 1.3 | WS peak |
+| --- | ---: | ---: | ---: | ---: |
+| linux-arm64 N2 `tiny-4w` (net10 AdvSIMD) | 241 | **180** | **0.75×** | 840 → **572 MB** |
+| linux-arm64 `tiny-4w-ns2` | 374 | **295** | **0.79×** | |
+| linux-arm64 `tiny-4w-scalar` | 984 | **856** | **0.87×** | |
+| win-x64 7763 `tiny-4w` (AVX2) | 167 | ~184 | flat (noise) | 817 → **515 MB** |
+| win-x64 7763 `tiny-4w-ns2` | **343** | **228** | **0.66×** | |
+| win-x64 7763 `tiny-4w-noavx` | 481 | **380** | **0.79×** | |
+| win-x64 7763 `tiny-4w-scalar` | 1368 | **1220** | **0.89×** | |
 
-In 1.2 the same-replica OpenVINO / this-library ratio was 0.96; 1.3 is **1.38** (this library ahead).
-
-Local engine comparison (Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images, n=99). c is [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) **`20d0de6`** ([2026-09-14 DLL](https://cv-public.sdcb.ai/2026/lw_ppocr_c.20260914.20d0de6.dll)). Wall time is mean ms/image.
-
-| Model | Engine | mean ms/image | vs this library | Exact lines | CER | WS peak |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| tiny | This library | **87.8** | **1.00** | 734/1026 | **2.71%** | 803 MB |
-| tiny | [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET) | 132 | 1.51 | 644/1026 | 3.55% | 2785 MB |
-| tiny | lw.PPOCR.C | 186 | 2.12 | 744/1026 | 4.01% | **539 MB** |
-| medium | This library | **641** | **1.00** | 992/1026 | 0.68% | 2430 MB |
-| medium | OpenVINO.NET | 1077 | 1.68 | 810/1026 | 1.74% | 4516 MB |
-| medium | lw.PPOCR.C | 2193 | 3.42 | **1004/1026** | **0.24%** | **1481 MB** |
-
-Same-machine medium 4w vs this library 1.2.0: 1507 → **641 ms** (about 0.43×), CER still 0.68%. small and how to read the numbers: [`docs/perf.md`](docs/perf.md).
+Local Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images (n=99), this library mean: small **237.5 → 204 ms** (0.86×), medium **641 → 564 ms** (0.88×).
+1.3 same-machine OpenVINO / c and per-ISA ratios: [`docs/perf.md`](docs/perf.md).
 
 ## Reproducing performance
 
