@@ -19,6 +19,7 @@ internal interface IBinaryOp
 #if !NETSTANDARD2_0
     Vector512<float> Apply(Vector512<float> left, Vector512<float> right);
     Vector256<float> Apply(Vector256<float> left, Vector256<float> right);
+    Vector128<float> Apply(Vector128<float> left, Vector128<float> right);
 #endif
     Vector<float> Apply(Vector<float> left, Vector<float> right);
     float Apply(float left, float right);
@@ -32,6 +33,9 @@ internal readonly struct AddOp : IBinaryOp
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector256<float> Apply(Vector256<float> left, Vector256<float> right) => Avx.Add(left, right);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Vector128<float> Apply(Vector128<float> left, Vector128<float> right) => Vector128.Add(left, right);
 #endif
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector<float> Apply(Vector<float> left, Vector<float> right) => left + right;
@@ -48,6 +52,9 @@ internal readonly struct SubOp : IBinaryOp
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector256<float> Apply(Vector256<float> left, Vector256<float> right) => Avx.Subtract(left, right);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Vector128<float> Apply(Vector128<float> left, Vector128<float> right) => Vector128.Subtract(left, right);
 #endif
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector<float> Apply(Vector<float> left, Vector<float> right) => left - right;
@@ -64,6 +71,9 @@ internal readonly struct MulOp : IBinaryOp
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector256<float> Apply(Vector256<float> left, Vector256<float> right) => Avx.Multiply(left, right);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Vector128<float> Apply(Vector128<float> left, Vector128<float> right) => Vector128.Multiply(left, right);
 #endif
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector<float> Apply(Vector<float> left, Vector<float> right) => left * right;
@@ -80,6 +90,9 @@ internal readonly struct DivOp : IBinaryOp
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector256<float> Apply(Vector256<float> left, Vector256<float> right) => Avx.Divide(left, right);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Vector128<float> Apply(Vector128<float> left, Vector128<float> right) => Vector128.Divide(left, right);
 #endif
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Vector<float> Apply(Vector<float> left, Vector<float> right) => left / right;

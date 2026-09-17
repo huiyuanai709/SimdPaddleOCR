@@ -1,22 +1,14 @@
 using System.Numerics;
-#if !NETSTANDARD2_0
-using System.Runtime.Intrinsics.Arm;
-using System.Runtime.Intrinsics.X86;
-#endif
 using Sdcb.SimdPaddleOCR.Kernels;
 using static Sdcb.SimdPaddleOCR.UnitTests.KernelCorrectnessTests;
 
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
-/// <summary>Channels-last kernels against a scalar NCHW reference. Same gate as LayoutPlanner (skip only when PPOCR_NHWC=0 or net10 AdvSIMD).</summary>
+/// <summary>Channels-last kernels against a scalar NCHW reference. Same gate as LayoutPlanner (skip only when PPOCR_NHWC=0).</summary>
 public class NhwcKernelTests
 {
     private static bool Supported =>
-#if !NETSTANDARD2_0
-        Environment.GetEnvironmentVariable("PPOCR_NHWC") != "0" && !AdvSimd.IsSupported;
-#else
         Environment.GetEnvironmentVariable("PPOCR_NHWC") != "0";
-#endif
 
     private static float[] Rand(int length, int seed, float scale = 1f)
     {

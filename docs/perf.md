@@ -2,7 +2,24 @@
 
 ## 1.4（未发布）
 
-把 NHWC 扩到 ns2、无 HW intrinsic 的 x64（专用 scalar tile），以及图输入直接标 NHWC；net10 AdvSIMD 与 `PPOCR_NHWC=0` 仍是 NCHW。公开 `InferenceSession.Run` 仍收逻辑 NCHW，入口自动转置。下面 1.3 本机表和 CI 表仍是 `37fe1fd` 的数，不要当成 1.4。
+把 NHWC 扩到 ns2、无 HW intrinsic 的 x64（专用 scalar tile）、net10 AdvSIMD（手写 tile），以及图输入直接标 NHWC；`PPOCR_NHWC=0` 仍关。公开 `InferenceSession.Run` 仍收逻辑 NCHW，入口自动转置。下面 1.3 本机表和 1.3 CI 表仍是 `37fe1fd` 的数，不要当成 1.4。
+
+### CI linux-arm64 N2（手写 NHWC AdvSIMD）
+
+旧结论（NCHW AdvSIMD vs NHWC `Vector` Count==4）是 tiny-4w ~230 vs ~286，所以当时默认关闸。手写 NEON tile 之后，N2 上已经翻过来。
+
+| 来源 | 提交 | 布局 |
+| --- | --- | --- |
+| [35212321161](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35212321161) | `6a2a649` | net10 ARM 仍 NCHW AdvSIMD |
+| [35215170283](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35215170283) | `2f16ff5` | 默认开 NHWC + 手写 AdvSIMD tile |
+
+6 replica 中位 ms/图，CER 都是 757/1022：
+
+| 用例 | 旧 NCHW | 本分支 | 相对 |
+| --- | ---: | ---: | ---: |
+| linux-arm64 `tiny-4w` | ~227 | **175–184**（约 179） | **0.79×** |
+| `tiny-4w-ns2` | ~298 | ~295–302 | 持平（ns2 仍走 Vector） |
+| `tiny-4w-scalar` | ~857 | ~850–869 | 持平 |
 
 ## 1.3（2026-09-14）
 

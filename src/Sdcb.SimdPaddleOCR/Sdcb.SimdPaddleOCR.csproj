@@ -26,6 +26,7 @@
     <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
     <Compile Remove="**/*Avx*.cs" />
     <Compile Remove="**/*Avx512*.cs" />
+    <Compile Remove="**/*AdvSimd.cs" />
     <Compile Remove="Kernels/Conv1x1.Int8Vnni.cs" />
   </ItemGroup>
   <ItemGroup>
