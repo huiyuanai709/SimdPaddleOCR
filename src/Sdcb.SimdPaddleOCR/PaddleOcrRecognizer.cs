@@ -185,7 +185,14 @@ public sealed class PaddleOcrRecognizer : IDisposable
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrRecognizer));
         int volume = checked(batch * 3 * 48 * width);
         InferenceSession? session = TryTakeBestFit(volume);
-        return session ?? _compiled.CreateRequest();
+        if (session is null)
+        {
+            session = _compiled.CreateRequest();
+            // RunCtcGraph stops before the vocab MatMul; do not plan the
+            // [T×vocab] logits/softmax planes that path never writes.
+            session.PlanForCtcProjection = true;
+        }
+        return session;
     }
 
     // ConcurrentBag handed whatever session was on top, so each of the ~8

@@ -19,6 +19,7 @@ public sealed partial class InferenceSession : IDisposable
     private static bool s_profileEnabled;
     private static readonly bool s_dumpConv = Environment.GetEnvironmentVariable("PPOCR_DUMP_CONV") is not null;
     private static readonly bool s_dumpNodes = Environment.GetEnvironmentVariable("PPOCR_DUMP_NODES") is not null;
+    private static readonly bool s_dumpPlan = Environment.GetEnvironmentVariable("PPOCR_DUMP_PLAN") is not null;
     private static readonly long[] s_profileTicks = new long[32];
     private static readonly long[] s_profileCalls = new long[32];
     private static readonly long[] s_profileConvClassTicks = new long[5];
@@ -31,8 +32,9 @@ public sealed partial class InferenceSession : IDisposable
     private readonly int _inputIndex, _outputIndex;
     private readonly int _intraOpThreads;
     private readonly ResizeWorkspace _resizeWorkspace = new();
-    private float[] _workspace = [];
+    private NativeWorkspace? _workspace;
     private int _highWaterInputVolume;
+    private int _plannedNodeCount;
     private bool _hasShape;
     private bool _disposed;
 
@@ -55,6 +57,16 @@ public sealed partial class InferenceSession : IDisposable
     /// sessions that already paid for them.
     /// </summary>
     internal int HighWaterInputVolume => _highWaterInputVolume;
+
+    /// <summary>
+    /// When set, <see cref="Reshape"/> plans the workspace only through the
+    /// node before the final CTC projection whenever
+    /// <see cref="TryRunUntilCtcProjection"/> can serve that shape: the
+    /// <c>[T×vocab]</c> logits/softmax planes (the largest REC activations)
+    /// are never materialized on that path. A full <see cref="Run"/> on such a
+    /// session transparently re-plans the whole graph first.
+    /// </summary>
+    internal bool PlanForCtcProjection { get; set; }
 
     /// <summary>
     /// Graph-input window inside the planned activation workspace (after
@@ -122,159 +134,258 @@ public sealed partial class InferenceSession : IDisposable
         int[][] resolved = _compiled.ResolveShapesFor(inputShape);
         for (int i = 0; i < _tensors.Length; i++)
             _tensors[i].SetShape(resolved[i]);
-        PlanWorkspace();
+        int nodeLimit = _model.Nodes.Length;
+        if (PlanForCtcProjection &&
+            TryResolveCtcProjection(out _, out int matMulIndex, out _, out _, out _, out _, out _, out _))
+            nodeLimit = matMulIndex;
+        PlanWorkspace(nodeLimit);
         _hasShape = true;
     }
 
-    // Single-block activation workspace planned from the last-use table: a
-    // tensor's region is released after its last consumer and reused
-    // first-fit with adjacent coalescing, aligned to 16 floats (64 bytes),
-    // matching lw_plan_workspace. Only allocation locations change.
-    private void PlanWorkspace()
+    private void EnsureFullPlan()
+    {
+        if (_plannedNodeCount < _model.Nodes.Length)
+            PlanWorkspace(_model.Nodes.Length);
+    }
+
+    // Re-planning may replace the unmanaged block; an input span that aliased
+    // the old graph-input window must be copied out before it is freed.
+    private ReadOnlySpan<float> EnsureFullPlan(ReadOnlySpan<float> input)
+    {
+        if (_plannedNodeCount >= _model.Nodes.Length) return input;
+        float[]? copy = input.Overlaps(_tensors[_inputIndex].Data) ? input.ToArray() : null;
+        PlanWorkspace(_model.Nodes.Length);
+        return copy ?? input;
+    }
+
+    // Single-block activation workspace planned offline from lifetimes:
+    // every non-constant tensor lives from the node that writes it through
+    // its last consumer; storage is placed greedy-by-size (largest first, at
+    // the lowest offset free of any lifetime-overlapping neighbour), aligned
+    // to 16 floats (64 bytes). Only allocation locations change — kernels
+    // never depend on addresses. Nodes at or past nodeLimit are not planned;
+    // their outputs stay unbound.
+    private void PlanWorkspace(int nodeLimit)
     {
         const int Align = 16;
         int tensorCount = _tensors.Length, nodeCount = _model.Nodes.Length;
+        NodeRecord[] nodes = _model.Nodes;
         int[] offsets = new int[tensorCount];
         int[] lengths = new int[tensorCount];
-        for (int i = 0; i < tensorCount; i++)
-            lengths[i] = _tensors[i].IsConstant ? 0 : checked((int)_tensors[i].ElementCount);
-
-        // Offset-sorted free list + adjacent merge, first-fit from the
-        // lowest address, same as C. `assigned` is liveness; `planned`
-        // remembers that a tensor already has an offset. Released
-        // intermediates stay planned so we do not stack them again —
-        // the old leftover pass treated every dead activation as a new
-        // allocation and grew tiny DET from ~73 MB to ~687 MB.
-        List<(int Offset, int Size)> free = [];
-        int bump = 0;
-        bool[] assigned = new bool[tensorCount];
+        int[] start = new int[tensorCount];
+        int[] end = new int[tensorCount];
         bool[] planned = new bool[tensorCount];
-
-        void AddFree(int offset, int size)
-        {
-            if (size <= 0) return;
-            int position = 0;
-            while (position < free.Count && free[position].Offset < offset)
-                position++;
-            free.Insert(position, (offset, size));
-            if (position > 0 &&
-                free[position - 1].Offset + free[position - 1].Size == offset)
-            {
-                (int prevOffset, int prevSize) = free[position - 1];
-                free[position - 1] = (prevOffset, prevSize + size);
-                free.RemoveAt(position);
-                position--;
-                offset = free[position].Offset;
-                size = free[position].Size;
-            }
-            if (position + 1 < free.Count &&
-                offset + size == free[position + 1].Offset)
-            {
-                free[position] = (offset, size + free[position + 1].Size);
-                free.RemoveAt(position + 1);
-            }
-        }
-
-        int Allocate(int length, int preferOffset = -1)
-        {
-            int size = (length + Align - 1) / Align * Align;
-            if (preferOffset >= 0 && TryCarve(preferOffset, size))
-                return preferOffset;
-            for (int i = 0; i < free.Count; i++)
-            {
-                if (free[i].Size < size) continue;
-                (int offset, int blockSize) = free[i];
-                free.RemoveAt(i);
-                if (blockSize > size)
-                    AddFree(offset + size, blockSize - size);
-                return offset;
-            }
-            int bumpOffset = bump;
-            bump += size;
-            return bumpOffset;
-        }
-
-        bool TryCarve(int offset, int size)
-        {
-            for (int i = 0; i < free.Count; i++)
-            {
-                (int blockOffset, int blockSize) = free[i];
-                if (offset < blockOffset || offset + size > blockOffset + blockSize)
-                    continue;
-                free.RemoveAt(i);
-                if (offset > blockOffset)
-                    AddFree(blockOffset, offset - blockOffset);
-                int end = offset + size, blockEnd = blockOffset + blockSize;
-                if (end < blockEnd)
-                    AddFree(end, blockEnd - end);
-                return true;
-            }
-            return false;
-        }
-
-        void Release(int index)
-            => AddFree(offsets[index], (lengths[index] + Align - 1) / Align * Align);
-
-        foreach (uint input in _model.GraphInputs)
-        {
-            int index = checked((int)input);
-            if (_tensors[index].IsConstant || lengths[index] == 0) continue;
-            offsets[index] = Allocate(lengths[index]);
-            assigned[index] = true;
-            planned[index] = true;
-        }
-        // Bucket tensors by the node at which they become releasable: a
-        // tensor is freed when we reach the node right after its last
-        // consumer, i.e. exactly when the previous per-node scan condition
-        // `!HasConsumerAfter(i, ni - 1)` first became true. Graph outputs
-        // carry _lastUse == nodeCount, so their bucket index falls out of
-        // range and they are never released — same effect as the removed
-        // IsGraphOutput guard. Replaces an O(nodes x tensors) scan (DET:
-        // 245 x 411) that ran on every reshape, i.e. on every image.
-        int[] releaseHead = new int[nodeCount + 1];
-        int[] releaseNext = new int[tensorCount];
-        ArrayCompat.Fill(releaseHead, -1);
         for (int i = 0; i < tensorCount; i++)
+            lengths[i] = _tensors[i].IsConstant || _compiled.PhantomSink(i) >= 0
+                ? 0 : checked((int)_tensors[i].ElementCount);
+        for (int ni = nodeLimit; ni < nodeCount; ni++)
+            foreach (uint output in nodes[ni].Outputs)
+                lengths[checked((int)output)] = 0;
+        foreach (uint input in _model.GraphInputs)
+            planned[checked((int)input)] = lengths[checked((int)input)] != 0;
+
+        // A fused group [ni, ni+skip] runs entirely at node ni, so every
+        // output it produces (the sink, or a materialized intermediate on a
+        // fallback path) is physically written at ni, not at its own node.
+        for (int ni = 0; ni < nodeLimit; ni++)
         {
-            if (_tensors[i].IsConstant || lengths[i] == 0) continue;
-            int at = _compiled.LastUse(i) + 1;
-            if ((uint)at >= (uint)releaseHead.Length) continue;
-            releaseNext[i] = releaseHead[at];
-            releaseHead[at] = i;
-        }
-        for (int ni = 0; ni < nodeCount; ni++)
-        {
-            for (int i = releaseHead[ni]; i >= 0; i = releaseNext[i])
+            int skip = _compiled.FusedSkip(ni);
+            for (int k = ni; k <= ni + skip && k < nodeLimit; k++)
             {
-                if (!assigned[i]) continue;
-                assigned[i] = false;
-                Release(i);
-            }
-            foreach (uint output in _model.Nodes[ni].Outputs)
-            {
-                int index = checked((int)output);
-                if (_tensors[index].IsConstant) continue;
-                assigned[index] = true;
-                planned[index] = true;
-                if (lengths[index] != 0)
+                foreach (uint output in nodes[k].Outputs)
                 {
-                    int prefer = -1;
-                    int src = _compiled.ElementwiseInPlaceSource(index);
-                    if (src >= 0 && planned[src] && !assigned[src] && lengths[src] == lengths[index])
-                        prefer = offsets[src];
-                    offsets[index] = Allocate(lengths[index], prefer);
+                    int index = checked((int)output);
+                    if (lengths[index] == 0) continue;
+                    start[index] = ni;
+                    planned[index] = true;
                 }
             }
+            ni += skip;
+        }
+        for (int i = 0; i < tensorCount; i++)
+        {
+            if (!planned[i]) { lengths[i] = 0; continue; }
+            end[i] = Math.Max(_compiled.LastUse(i), start[i]);
         }
 
-        // Grow-only: shrinking here reallocates and zeros a large float[]
-        // on every smaller REC (n, width), which showed up as ~70–250 ms
-        // rec_reshape and regressed tiny 1w / small 4w. The recognizer pool
-        // routes wide lines onto sessions that already hold this high-water
-        // so sibling workers do not each copy the max buffer. Unique LOH
-        // sizes are discarded by PooledArrays.
-        if (_workspace.Length < bump)
-            _workspace = new float[bump];
+        // Aliasing groups share one region: Concat whose inputs are sole-use
+        // contiguous chunks (zero-copy, see Concat), and elementwise sinks
+        // that overwrite their source in place (GELU / HardSwish).
+        int[] group = new int[tensorCount];
+        int[] intraOffset = new int[tensorCount];
+        ArrayCompat.Fill(group, -1);
+        List<int> groupSize = [], groupStart = [], groupEnd = [];
+        int graphInput = _inputIndex;
+        for (int ni = 0; ni < nodeLimit; ni++)
+        {
+            NodeRecord node = nodes[ni];
+            if (node.Operator != OperatorId.Concat || node.Outputs.Length != 1 || node.Inputs.Length < 2)
+                continue;
+            int o = checked((int)node.Outputs[0]);
+            if (lengths[o] == 0 || group[o] >= 0 || _compiled.IsNhwcTensor(node.Outputs[0]) ||
+                _compiled.FusedSkip(ni) != 0)
+                continue;
+            int[] oShape = _tensors[o].Shape;
+            int axis = I32(_model.GetParameters(node), 4);
+            if (axis < 0) axis += oShape.Length;
+            if ((uint)axis >= (uint)oShape.Length) continue;
+            long outer = 1;
+            for (int d = 0; d < axis; d++) outer *= oShape[d];
+            if (outer != 1) continue;
+            bool ok = true;
+            long total = 0;
+            for (int k = 0; k < node.Inputs.Length && ok; k++)
+            {
+                int t = checked((int)node.Inputs[k]);
+                ok = lengths[t] != 0 && group[t] < 0 && t != graphInput &&
+                     !_compiled.IsNhwcTensor(node.Inputs[k]) && _compiled.LastUse(t) == ni &&
+                     (k == node.Inputs.Length - 1 || lengths[t] % Align == 0);
+                for (int j = 0; j < k && ok; j++) ok = node.Inputs[j] != node.Inputs[k];
+                total += lengths[t];
+            }
+            if (!ok || total != lengths[o]) continue;
+            int g = groupSize.Count;
+            int gStart = start[o], gEnd = end[o], running = 0;
+            for (int k = 0; k < node.Inputs.Length; k++)
+            {
+                int t = checked((int)node.Inputs[k]);
+                group[t] = g;
+                intraOffset[t] = running;
+                running += lengths[t];
+                gStart = Math.Min(gStart, start[t]);
+                gEnd = Math.Max(gEnd, end[t]);
+            }
+            group[o] = g;
+            intraOffset[o] = 0;
+            groupSize.Add(lengths[o]);
+            groupStart.Add(gStart);
+            groupEnd.Add(gEnd);
+        }
+        for (int i = 0; i < tensorCount; i++)
+        {
+            int src = _compiled.ElementwiseInPlaceSource(i);
+            if (src < 0 || lengths[i] == 0 || lengths[src] == 0 || lengths[src] != lengths[i] ||
+                group[i] >= 0 || group[src] >= 0 || src == graphInput ||
+                _compiled.LastUse(src) > start[i] + _compiled.FusedSkip(start[i]))
+                continue;
+            int g = groupSize.Count;
+            group[i] = g;
+            group[src] = g;
+            groupSize.Add(lengths[i]);
+            groupStart.Add(Math.Min(start[src], start[i]));
+            groupEnd.Add(Math.Max(end[src], end[i]));
+        }
+        // Standalone binary elementwise nodes overwrite a same-shape operand
+        // that dies at that node: Elementwise/ElementwiseParallel load both
+        // operands of an index before storing it, so dst == src is exact.
+        // Absorbing into an existing group is allowed when the operand sits at
+        // the group's base and every other member is already dead.
+        bool[] fusedTail = new bool[nodeLimit];
+        for (int ni = 0; ni < nodeLimit; ni++)
+        {
+            int skip = _compiled.FusedSkip(ni);
+            for (int k = ni + 1; k <= ni + skip && k < nodeLimit; k++) fusedTail[k] = true;
+            ni += skip;
+        }
+        for (int ni = 0; ni < nodeLimit; ni++)
+        {
+            NodeRecord node = nodes[ni];
+            if (fusedTail[ni] || _compiled.FusedSkip(ni) != 0 ||
+                node.Operator is not (OperatorId.Add or OperatorId.Sub or OperatorId.Mul or OperatorId.Div) ||
+                node.Inputs.Length != 2 || node.Outputs.Length != 1)
+                continue;
+            int o = checked((int)node.Outputs[0]);
+            if (lengths[o] == 0 || group[o] >= 0) continue;
+            int[] oShape = _tensors[o].Shape;
+            for (int k = 0; k < 2; k++)
+            {
+                int t = checked((int)node.Inputs[k]);
+                if (lengths[t] == 0 || lengths[t] != lengths[o] || t == graphInput ||
+                    _compiled.LastUse(t) != ni ||
+                    _compiled.IsNhwcTensor(node.Inputs[k]) != _compiled.IsNhwcTensor(node.Outputs[0]) ||
+                    !SameDims(_tensors[t].Shape, oShape))
+                    continue;
+                int g = group[t];
+                if (g < 0)
+                {
+                    g = groupSize.Count;
+                    group[t] = g;
+                    groupSize.Add(lengths[o]);
+                    groupStart.Add(start[t]);
+                    groupEnd.Add(end[t]);
+                }
+                else
+                {
+                    if (intraOffset[t] != 0 || groupSize[g] != lengths[o]) continue;
+                    bool othersDead = true;
+                    for (int m = 0; m < tensorCount && othersDead; m++)
+                        if (m != t && group[m] == g && end[m] > ni) othersDead = false;
+                    if (!othersDead) continue;
+                }
+                group[o] = g;
+                intraOffset[o] = 0;
+                groupStart[g] = Math.Min(groupStart[g], start[o]);
+                groupEnd[g] = Math.Max(groupEnd[g], end[o]);
+                break;
+            }
+        }
+        int[] groupOffset = new int[groupSize.Count];
+        List<int> order = [];
+        for (int i = 0; i < tensorCount; i++)
+            if (lengths[i] != 0 && group[i] < 0) order.Add(i);
+        for (int g = 0; g < groupSize.Count; g++) order.Add(tensorCount + g);
+        int SizeOf(int key) => key < tensorCount ? lengths[key] : groupSize[key - tensorCount];
+        int StartOf(int key) => key < tensorCount ? start[key] : groupStart[key - tensorCount];
+        int EndOf(int key) => key < tensorCount ? end[key] : groupEnd[key - tensorCount];
+        order.Sort((a, b) =>
+        {
+            int c = SizeOf(b).CompareTo(SizeOf(a));
+            if (c != 0) return c;
+            c = StartOf(a).CompareTo(StartOf(b));
+            return c != 0 ? c : a.CompareTo(b);
+        });
+
+        // Greedy by size: candidates that overlap this lifetime, sorted by
+        // offset, define the gaps; take the lowest one that fits.
+        List<(int Offset, int Size, int Start, int End)> placed = [];
+        List<(int Offset, int Size)> conflicts = [];
+        int bump = 0;
+        foreach (int key in order)
+        {
+            int size = (SizeOf(key) + Align - 1) / Align * Align;
+            int s = StartOf(key), e = EndOf(key);
+            conflicts.Clear();
+            foreach ((int Offset, int Size, int Start, int End) p in placed)
+                if (p.Start <= e && s <= p.End) conflicts.Add((p.Offset, p.Size));
+            conflicts.Sort(static (a, b) => a.Offset.CompareTo(b.Offset));
+            int offset = 0;
+            foreach ((int Offset, int Size) c in conflicts)
+            {
+                if (c.Offset - offset >= size) break;
+                offset = Math.Max(offset, c.Offset + c.Size);
+            }
+            placed.Add((offset, size, s, e));
+            bump = Math.Max(bump, offset + size);
+            if (key < tensorCount) offsets[key] = offset;
+            else groupOffset[key - tensorCount] = offset;
+        }
+        for (int i = 0; i < tensorCount; i++)
+            if (group[i] >= 0) offsets[i] = groupOffset[group[i]] + intraOffset[i];
+
+        // Grow-only: shrinking here reallocates a large block on every
+        // smaller REC (n, width), which showed up as ~70–250 ms rec_reshape
+        // and regressed tiny 1w / small 4w. The recognizer pool routes wide
+        // lines onto sessions that already hold this high-water so sibling
+        // workers do not each copy the max buffer. The block is unmanaged so
+        // the superseded one leaves the Working Set at once (NativeWorkspace).
+        if (_workspace is null || _workspace.Length < bump)
+        {
+            _workspace?.Dispose();
+            _workspace = new NativeWorkspace(bump);
+        }
+        _plannedNodeCount = nodeLimit;
+        if (s_dumpPlan)
+            DumpPlan(offsets, lengths, bump);
         int[] inputDims = _tensors[_inputIndex].Shape;
         int inputVolume = 1;
         for (int d = 0; d < inputDims.Length; d++)
@@ -285,8 +396,70 @@ public sealed partial class InferenceSession : IDisposable
         {
             TensorValue tensor = _tensors[i];
             if (tensor.IsConstant) continue;
-            tensor.Bind(_workspace, offsets[i], planned[i] ? lengths[i] : 0);
+            // Fusion intermediates alias their sink so the fused executors'
+            // length/overlap guards see the storage the kernel really writes.
+            int sink = _compiled.PhantomSink(i);
+            if (sink >= 0)
+            {
+                tensor.Bind(_workspace, offsets[sink], lengths[sink]);
+                continue;
+            }
+            tensor.Bind(_workspace, offsets[i], lengths[i]);
         }
+    }
+
+    private static bool SameDims(int[] a, int[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++)
+            if (a[i] != b[i]) return false;
+        return true;
+    }
+
+    private void DumpPlan(int[] offsets, int[] lengths, int bump)
+    {
+        int[] shape = _tensors[_inputIndex].Shape;
+        // Liveness lower bound: max over nodes of the sum of live tensor sizes.
+        int nodeCount = _model.Nodes.Length;
+        long[] delta = new long[nodeCount + 2];
+        int[] producer = new int[lengths.Length];
+        ArrayCompat.Fill(producer, -1);
+        for (int ni = 0; ni < nodeCount; ni++)
+            foreach (uint o in _model.Nodes[ni].Outputs) producer[(int)o] = ni;
+        for (int i = 0; i < lengths.Length; i++)
+        {
+            if (lengths[i] == 0) continue;
+            int start = producer[i] < 0 ? 0 : producer[i];
+            int end = Math.Min(_compiled.LastUse(i) + 1, nodeCount + 1);
+            if (end <= start) end = start + 1;
+            delta[start] += lengths[i];
+            delta[end] -= lengths[i];
+        }
+        long live = 0, peak = 0; int peakNode = 0;
+        for (int ni = 0; ni <= nodeCount; ni++)
+        {
+            live += delta[ni];
+            if (live > peak) { peak = live; peakNode = ni; }
+        }
+        var sb = new System.Text.StringBuilder();
+        sb.Append("plan input=[").Append(string.Join(",", shape)).Append("] bump=")
+            .Append(bump).Append(" floats (").Append((bump * 4.0 / (1 << 20)).ToString("F1")).Append(" MB) workspace=")
+            .Append((_workspace!.Length * 4.0 / (1 << 20)).ToString("F1")).Append(" MB lowerBound=")
+            .Append(peak).Append(" (").Append((peak * 4.0 / (1 << 20)).ToString("F1")).Append(" MB @node ").Append(peakNode).Append(')');
+        var top = Enumerable.Range(0, lengths.Length)
+            .Where(i => lengths[i] > 0)
+            .OrderByDescending(i => lengths[i]).Take(16);
+        foreach (int i in top)
+        {
+            int p = producer[i];
+            sb.Append("\n  t").Append(i).Append(" len=").Append(lengths[i])
+                .Append(" off=").Append(offsets[i])
+                .Append(" shape=[").Append(string.Join(",", _tensors[i].Shape)).Append(']')
+                .Append(" node=").Append(p)
+                .Append(p >= 0 ? " " + _model.Nodes[p].Operator : "")
+                .Append(" lastUse=").Append(_compiled.LastUse(i));
+        }
+        Console.Error.WriteLine(sb.ToString());
     }
 
     private void EnsureShape()
@@ -299,6 +472,7 @@ public sealed partial class InferenceSession : IDisposable
     {
         if (_disposed) throw new ObjectDisposedException(nameof(InferenceSession));
         EnsureShape();
+        input = EnsureFullPlan(input);
         TensorValue inputTensor = _tensors[_inputIndex]; TensorValue outputTensor = _tensors[_outputIndex];
         if (input.Length != inputTensor.Length || output.Length < outputTensor.Length) throw new ArgumentException("Input/output buffer size mismatch.");
         Execute(input);
@@ -310,6 +484,7 @@ public sealed partial class InferenceSession : IDisposable
     {
         if (_disposed) throw new ObjectDisposedException(nameof(InferenceSession));
         EnsureShape();
+        input = EnsureFullPlan(input);
         TensorValue inputTensor = _tensors[_inputIndex];
         if (input.Length != inputTensor.Length) throw new ArgumentException("Input buffer size mismatch.");
         Execute(input);
@@ -354,6 +529,7 @@ public sealed partial class InferenceSession : IDisposable
     {
         if (_disposed) throw new ObjectDisposedException(nameof(InferenceSession));
         EnsureShape();
+        input = EnsureFullPlan(input);
         TensorValue inputTensor = _tensors[_inputIndex];
         if (input.Length != inputTensor.Length) throw new ArgumentException("Input buffer size mismatch.");
         outputIsLogits = HasSkippableOutputSoftmax(out NodeRecord softmax);
@@ -418,9 +594,13 @@ public sealed partial class InferenceSession : IDisposable
         rows = a.Shape[^2];
         inner = a.Shape[^1];
         columns = b.Shape[1];
-        batch = checked(a.Length / (rows * inner));
+        // Shape-derived (not bound length): also evaluated from Reshape before
+        // the workspace is planned.
+        long aCount = a.ElementCount;
+        if (rows <= 0 || inner <= 0 || aCount % (rows * inner) != 0) return false;
+        batch = checked((int)(aCount / (rows * inner)));
         if (b.Shape[0] != inner || projectedOutput.Shape[^1] != columns ||
-            projectedOutput.Length != checked(batch * rows * columns))
+            projectedOutput.ElementCount != checked((long)batch * rows * columns))
             return false;
         _compiled.TryGetPackedMatMul(matMul.Inputs[1], out packed);
         return global::Sdcb.SimdPaddleOCR.Kernels.MatMul.CanFuseArgMax(rows, inner, columns, packed);
@@ -444,6 +624,7 @@ public sealed partial class InferenceSession : IDisposable
     {
         if (_disposed) throw new ObjectDisposedException(nameof(InferenceSession));
         EnsureShape();
+        EnsureFullPlan();
         TensorValue inputTensor = _tensors[_inputIndex];
         if (input.Length != inputTensor.Length) throw new ArgumentException("Input buffer size mismatch.");
         if (inputTensor.IsBoundTo(input))
@@ -451,8 +632,7 @@ public sealed partial class InferenceSession : IDisposable
             Execute(input, true);
             return _tensors[_outputIndex].Data;
         }
-        float[]? previousBuffer = inputTensor.Buffer;
-        int previousOffset = inputTensor.Offset, previousLength = inputTensor.Length;
+        TensorValue.Binding previous = inputTensor.CurrentBinding;
         inputTensor.Bind(input, 0, input.Length);
         try
         {
@@ -461,8 +641,7 @@ public sealed partial class InferenceSession : IDisposable
         }
         finally
         {
-            if (previousBuffer is not null)
-                inputTensor.Bind(previousBuffer, previousOffset, previousLength);
+            inputTensor.Restore(previous);
         }
     }
 
@@ -1600,7 +1779,10 @@ public sealed partial class InferenceSession : IDisposable
             {
                 TensorValue t = _tensors[ti];
                 int chunk = t.Shape[axis] * inner;
-                t.Data.Slice(q * chunk, chunk).CopyTo(oData.Slice(dst, chunk));
+                // PlanWorkspace may have placed the input exactly at its
+                // destination chunk (zero-copy Concat).
+                if (!(t.SharesStorageWith(o) && t.Offset + q * chunk == o.Offset + dst))
+                    t.Data.Slice(q * chunk, chunk).CopyTo(oData.Slice(dst, chunk));
                 dst += chunk;
             }
     }
@@ -1775,7 +1957,8 @@ public sealed partial class InferenceSession : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _workspace = [];
+        _workspace?.Dispose();
+        _workspace = null;
     }
 
     /// <summary>
@@ -1785,10 +1968,12 @@ public sealed partial class InferenceSession : IDisposable
     /// of the session's single workspace block (or, for constants, the shared
     /// weight array). Only the binding changes during fused/in-place ops.
     /// </summary>
-    private sealed class TensorValue
+    private sealed unsafe class TensorValue
     {
         private readonly CompiledModel.TensorMeta _meta;
         private float[]? _buffer;
+        private NativeWorkspace? _native;
+        private byte[]? _constant;
         private int _offset;
         private int _length;
 
@@ -1798,8 +1983,9 @@ public sealed partial class InferenceSession : IDisposable
             Shape = meta.Shape;
             if (meta.IsConstant)
             {
-                _buffer = meta.Data;
-                _length = meta.Data.Length;
+                // Read-only float view over the model's shared constant bytes.
+                _constant = meta.Constant;
+                _length = meta.Constant.Length / sizeof(float);
             }
         }
 
@@ -1807,39 +1993,69 @@ public sealed partial class InferenceSession : IDisposable
         public bool IsConstant => _meta.IsConstant;
         public int[] Shape { get; private set; }
         public long ElementCount => Shape.Aggregate(1L, static (a, b) => checked(a * b));
-        public float[]? Buffer => _buffer;
         public int Offset => _offset;
         public int Length => _length;
 
         /// <summary>The tensor's element window; empty while unbound/zero-sized.</summary>
-        public Span<float> Data => _buffer is null ? [] : _buffer.AsSpan(_offset, _length);
+        public Span<float> Data => _buffer is not null
+            ? _buffer.AsSpan(_offset, _length)
+            : _native is not null ? new Span<float>(_native.Pointer + _offset, _length)
+            : _constant is not null
+                ? System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(_constant.AsSpan(0, _length * sizeof(float)))
+                : [];
 
         public void SetShape(int[] shape) => Shape = shape;
 
         public void Bind(float[] buffer, int offset, int length)
         {
             _buffer = buffer;
+            _native = null;
             _offset = offset;
             _length = length;
+        }
+
+        public void Bind(NativeWorkspace workspace, int offset, int length)
+        {
+            _buffer = null;
+            _native = workspace;
+            _offset = offset;
+            _length = length;
+        }
+
+        internal readonly record struct Binding(float[]? Buffer, NativeWorkspace? Native, int Offset, int Length);
+
+        public Binding CurrentBinding => new(_buffer, _native, _offset, _length);
+
+        public void Restore(Binding binding)
+        {
+            _buffer = binding.Buffer;
+            _native = binding.Native;
+            _offset = binding.Offset;
+            _length = binding.Length;
         }
 
         /// <summary>Points this tensor at another's storage (fused/in-place ops).</summary>
         public void ShareStorageWith(TensorValue other)
         {
             _buffer = other._buffer;
+            _native = other._native;
+            _constant = other._constant;
             _offset = other._offset;
             _length = other._length;
         }
 
+        /// <summary>True when both tensors are windows of the same backing block.</summary>
+        public bool SharesStorageWith(TensorValue other)
+            => (_buffer is not null || _native is not null) &&
+               ReferenceEquals(_buffer, other._buffer) && ReferenceEquals(_native, other._native);
+
         /// <summary>True when both tensors expose the identical storage window.</summary>
         public bool StorageEquals(TensorValue other)
-            => _buffer is not null && ReferenceEquals(_buffer, other._buffer)
-               && _offset == other._offset && _length == other._length;
+            => SharesStorageWith(other) && _offset == other._offset && _length == other._length;
 
         /// <summary>True when the two windows share any element of the same buffer.</summary>
         public bool Overlaps(TensorValue other)
-            => _buffer is not null && other._buffer is not null &&
-               ReferenceEquals(_buffer, other._buffer) &&
+            => SharesStorageWith(other) &&
                _offset < other._offset + other._length &&
                other._offset < _offset + _length;
 

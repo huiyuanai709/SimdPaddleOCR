@@ -32,7 +32,7 @@
 
 - **速度**：三档都是 sharp 最快，openvino 其次，c 最慢。c/sharp 约 2.1×（tiny）、2.3×（small）、3.4×（medium）。
 - **准确率**：tiny / small 是 sharp CER 最好；只有 medium 是 c 更好（0.24% vs 0.68%）。openvino 三档 CER 都差一截，行精确也最低。
-- **内存**：c 最省，openvino 最肥（tiny 已近 2.8 GB，medium 4.5 GB）。
+- **内存**：c 最省，openvino 最肥（tiny 已近 2.8 GB，medium 4.5 GB）。small 1w/4w 的 loaded / Δ WS / peak，以及为什么 c 涨得少、哪些不能无损搬到本库：[`small_memory_vs_c.md`](small_memory_vs_c.md)。
 - c 没有对外 profiler，上表没有 `det_graph` / `lines_wall`。
 
 JSON：`bench-out/csharp-tiny-4w.json`、`csharp-small-4w.json`、`v13-medium-4w-rerun.json`；`c-tiny-4w.json`、`c-small-4w.json`、`c-medium-4w.json`；`openvino-*-4w-local.json`。
