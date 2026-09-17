@@ -72,11 +72,14 @@ jobs:
           # build
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r '${{ matrix.rid }}' --no-self-contained -o artifacts/net10 --nologo
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
-          $dll = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
+          $exe = if ($IsWindows) { 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.exe' } else { 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests' }
 
           # run
-          # Host the dll with `dotnet` so macOS apphost does not need DOTNET_ROOT.
-          dotnet $dll --smoke --count 20 --engine sharp --workers 4 --model tiny --input dataset --case-id '${{ matrix.name }}' --out '${{ matrix.name }}-smoke.json'
+          # GHA macOS installs to ~/.dotnet; apphost default /usr/local/share/dotnet is empty.
+          # Do not set on Windows: x86 apphost would pick up the x64 install.
+          if ($IsMacOS) { $env:DOTNET_ROOT = Join-Path $HOME '.dotnet' }
+          if (-not $IsWindows) { chmod +x $exe }
+          & $exe --smoke --count 20 --engine sharp --workers 4 --model tiny --input dataset --case-id '${{ matrix.name }}' --out '${{ matrix.name }}-smoke.json'
           if ($LASTEXITCODE -ne 0) { throw "smoke failed: $LASTEXITCODE" }
       - uses: actions/upload-artifact@v7
         if: always()
@@ -101,11 +104,12 @@ jobs:
           # build
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-x64 --no-self-contained -o artifacts/net10 --nologo
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
-          $dll = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
+          $exe = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
 
           # run
+          chmod +x $exe
           foreach ($model in @('tiny','small','medium')) {
-            dotnet $dll --smoke --count 20 --engine sharp --workers 4 --model $model --input dataset --case-id $model --out "model-$model-smoke.json"
+            & $exe --smoke --count 20 --engine sharp --workers 4 --model $model --input dataset --case-id $model --out "model-$model-smoke.json"
             if ($LASTEXITCODE -ne 0) { throw "smoke $model failed: $LASTEXITCODE" }
           }
       - uses: actions/upload-artifact@v7
@@ -291,10 +295,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-arm64 --no-self-contained -o artifacts/ns20 --nologo -p:UseNs20Library=true
           if ($LASTEXITCODE -ne 0) { throw "dotnet build ns20 failed: $LASTEXITCODE" }
-          $dllNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
-          $dllNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests.dll'
+          $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
+          $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests'
 
           # run
+          chmod +x $exeNet10
+          chmod +x $exeNs20
           $base = 'linux-arm64'
           $cases = @(
             @{ id='tiny-1w';         workers=1; model='tiny'; isa='' },
@@ -307,7 +313,7 @@ jobs:
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
-              $dll = if ($c.ns2) { $dllNs20 } else { $dllNet10 }
+              $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine','sharp','--workers',$c.workers,'--model',$c.model,'--input','dataset',
                 '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
@@ -321,7 +327,7 @@ jobs:
                 }
               }
               try {
-                dotnet $dll @appArgs
+                & $exe @appArgs
                 if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
               }
               finally {
@@ -377,10 +383,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
           dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r osx-arm64 --no-self-contained -o artifacts/ns20 --nologo -p:UseNs20Library=true
           if ($LASTEXITCODE -ne 0) { throw "dotnet build ns20 failed: $LASTEXITCODE" }
-          $dllNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.dll'
-          $dllNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests.dll'
+          $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
+          $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests'
 
           # run
+          $env:DOTNET_ROOT = Join-Path $HOME '.dotnet'
+          chmod +x $exeNet10
+          chmod +x $exeNs20
           $base = 'osx-arm64'
           $cases = @(
             @{ id='tiny-1w';         workers=1; model='tiny'; isa='' },
@@ -391,7 +400,7 @@ jobs:
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
-              $dll = if ($c.ns2) { $dllNs20 } else { $dllNet10 }
+              $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine','sharp','--workers',$c.workers,'--model',$c.model,'--input','dataset',
                 '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
@@ -405,7 +414,7 @@ jobs:
                 }
               }
               try {
-                dotnet $dll @appArgs
+                & $exe @appArgs
                 if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
               }
               finally {
