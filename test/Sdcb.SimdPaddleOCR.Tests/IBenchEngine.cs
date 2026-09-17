@@ -32,8 +32,7 @@ static class BenchEngines
     {
         "sharp" => new SharpEngine(modelType, workers),
         "c" => new CEngine(cAssetsDir, workers, modelType),
-        "openvino" => new OpenVinoEngine(modelType),
-        _ => throw new ArgumentException("--engine must be sharp, c, or openvino"),
+        _ => throw new ArgumentException("--engine must be sharp or c"),
     };
 
     public static PaddleOcrModelBundle Bundle(string modelType) => modelType switch

@@ -62,7 +62,7 @@ JSON：`bench-out/csharp-tiny-4w.json`、`csharp-small-4w.json`、`v13-medium-4w
 
 1. **x64**：EPYC 7763 SIMD `tiny-4w` 中位应在约 **155–175 ms**；ns2 同 replica 比值大约 **2.0–2.2**。
 2. **ARM64**：N2 `tiny-4w` 应在约 **235–245 ms**。
-3. **引擎**：同 replica 上 OpenVINO / sharp 4w 应在 **1.35–1.41**。c 已钉到 `20d0de6`，c/sharp 比值等新 CI 再定。
+3. **引擎**：同 replica 上 OpenVINO / sharp 4w 应在 **1.35–1.41**。c 已钉到 `20d0de6`，c/sharp 比值等新 CI 再定。后续 CI 不再跑 OpenVINO.NET，这条只解释当时测到的比值。
 
 ---
 
@@ -113,7 +113,7 @@ Replica 配置（`32cb921`）：
 - **引擎**（后两者只在 win-x64 引擎套件里比；**没有**和 PaddleOCR 官方实现做对比）：
   - `sharp` = 本库 Sdcb.SimdPaddleOCR
   - `c` = [lw.PPOCR.C](https://github.com/lxw112190/lw.PPOCR.C) 的 **2026 年 8 月底**一份构建（`lw_ppocr_c.dll`），**不代表**该项目最新版本
-  - `openvino` = 同作者的 [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET)（CI 里是 `Sdcb.OpenVINO.PaddleOCR` 0.8.1 + `Sdcb.OpenVINO.runtime.win-x64` 2026.2.0）
+  - `openvino` = 同作者的 [OpenVINO.NET](https://github.com/sdcb/OpenVINO.NET)（当时 CI 是 `Sdcb.OpenVINO.PaddleOCR` 0.8.1 + `Sdcb.OpenVINO.runtime.win-x64` 2026.2.0；后续套件已去掉，不再新测）
 
 ## 环境
 
@@ -281,7 +281,7 @@ small 大约是 tiny 的 3 倍墙钟，medium 大约是 tiny 的 17 倍；正确
 
 1. **回归判定（x64）**：只看 win-x64 **EPYC 7763** 的 SIMD 套件。`tiny-4w` 中位应落在约 **234–242 ms**（IQR）；`tiny-4w-ns2` 同 replica 比值应在 **1.51–1.61**。单次 230–285 都出现过，不要用单 replica 绝对时间喊回归。
 2. **回归判定（ARM64）**：只看 linux-arm64 N2。`tiny-4w` 应在 **272–274 ms**（IQR）；ns2 比值 **1.53–1.56**。这个平台比 Windows 更适合做自动阈值。
-3. **引擎对比**：只用 win-x64 引擎套件、同一 replica。sharp 4w vs lw.PPOCR.C 4w 应在 **1.25–1.27**；vs OpenVINO.NET 应在 **0.94–0.98**（忽略个别 OpenVINO.NET 长尾）。
+3. **引擎对比**：只用 win-x64 引擎套件、同一 replica。sharp 4w vs lw.PPOCR.C 4w 应在 **1.25–1.27**；1.2 当时 vs OpenVINO.NET 为 **0.94–0.98**（忽略个别 OpenVINO.NET 长尾）。后续 CI 不再跑 OpenVINO.NET。
 4. **不要**：把 9V74/Xeon 的 AVX-512 160 ms 和 7763 的 238 ms 写成「优化了 30%」；不要用 osx-arm64 / osx-x64 的绝对时间做 CI 门禁；不要拿 20 张 smoke 和 100 张 bench 比快慢。
 
 复现：推送或手动触发 [`.github/workflows/test.yml`](../.github/workflows/test.yml)，下载 `perf-report` artifact。本地同一套数据可用 `test/Sdcb.SimdPaddleOCR.Tests` 的 `--benchmark` / `--summarize`。

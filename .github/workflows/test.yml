@@ -211,8 +211,7 @@ jobs:
             @{ id='tiny-1w';      engine='sharp';    workers=1; model='tiny' },
             @{ id='tiny-4w';      engine='sharp';    workers=4; model='tiny' },
             @{ id='tiny-c-1w';    engine='c';        workers=1; model='tiny' },
-            @{ id='tiny-c-4w';    engine='c';        workers=4; model='tiny' },
-            @{ id='tiny-openvino'; engine='openvino'; workers=4; model='tiny' }
+            @{ id='tiny-c-4w';    engine='c';        workers=4; model='tiny' }
           )
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"

@@ -1,5 +1,7 @@
 # SimdPaddleOCR 性能基准测试与优化分析报告 (Medium 模型, 4 Workers)
 
+历史记录。`--engine openvino` 已从测试套件移除，下列 OpenVINO 命令不再可用；现行引擎对比只跑 sharp 与 c。
+
 ## 1. 测试场景与命令行
 
 ### 场景一：标准 100 图测试

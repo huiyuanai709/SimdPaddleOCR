@@ -46,7 +46,7 @@ Harness：
 dotnet run --project test/Sdcb.SimdPaddleOCR.Tests -c Release -- --help
 ```
 
-`--engine` 只能是 `sharp` / `c` / `openvino`。C 额外要 `--c-assets`。
+`--engine` 只能是 `sharp` / `c`。C 额外要 `--c-assets`。
 
 统计口径：预解码 BGR，**第 1 张 warmup，n=99**。墙钟看 mean/median/p95。内存看 JSON 的四个字段（见 §3）。`--summarize` **只印时间与准确率，不印内存**，内存必须读 JSON。
 

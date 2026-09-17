@@ -9,9 +9,6 @@ obj/
 c-trace.txt
 *.user
 
-# OpenVINO benchmark and debug artifacts
-.tmp-openvino/
-
 # LINQPad NuGet pack output
 build/nupkgs/
 build/nuget.exe
