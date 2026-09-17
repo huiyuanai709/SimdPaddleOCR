@@ -777,20 +777,4 @@ internal static unsafe partial class Nhwc
         }
     }
 
-    private static void PointwiseScalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
-        Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
-        NhwcActivation activation, float alpha, float beta, int threads)
-        => PointwiseVec(input, packedWeights, bias, output, pixels, inputChannels, outputChannels, residual, activation, alpha, beta, threads);
-
-    private static void DenseScalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
-        Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
-        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
-        ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
-        => DenseVec(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
-            outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
-
-    private static void ConvTranspose2x2Stride2Scalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
-        Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
-        NhwcActivation activation, int threads)
-        => ConvTranspose2x2Stride2Vec(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
 }

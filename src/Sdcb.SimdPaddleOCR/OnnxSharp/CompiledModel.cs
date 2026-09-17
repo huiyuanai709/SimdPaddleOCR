@@ -107,6 +107,7 @@ public sealed class CompiledModel
         }
     }
     internal int InputIndex => _inputIndex;
+    internal bool InputIsNhwc => _tensors[_inputIndex].IsNhwc;
     internal int OutputIndex => _outputIndex;
     internal int IntraOpThreads => _intraOpThreads;
     internal int TensorCount => _tensors.Length;

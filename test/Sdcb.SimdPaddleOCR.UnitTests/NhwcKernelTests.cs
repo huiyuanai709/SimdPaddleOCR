@@ -1,5 +1,6 @@
 using System.Numerics;
 #if !NETSTANDARD2_0
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 #endif
 using Sdcb.SimdPaddleOCR.Kernels;
@@ -7,14 +8,15 @@ using static Sdcb.SimdPaddleOCR.UnitTests.KernelCorrectnessTests;
 
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
-/// <summary>Channels-last kernels against a scalar NCHW reference. Same gate as LayoutPlanner (AVX-512, AVX2+FMA, or Vector 4/8).</summary>
+/// <summary>Channels-last kernels against a scalar NCHW reference. Same gate as LayoutPlanner (skip only when PPOCR_NHWC=0 or net10 AdvSIMD).</summary>
 public class NhwcKernelTests
 {
     private static bool Supported =>
 #if !NETSTANDARD2_0
-        Avx512F.IsSupported || (Avx2.IsSupported && Fma.IsSupported) ||
+        Environment.GetEnvironmentVariable("PPOCR_NHWC") != "0" && !AdvSimd.IsSupported;
+#else
+        Environment.GetEnvironmentVariable("PPOCR_NHWC") != "0";
 #endif
-        (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4);
 
     private static float[] Rand(int length, int seed, float scale = 1f)
     {
@@ -123,9 +125,15 @@ public class NhwcKernelTests
             float[] expected = ConvRef(input, weights, bias, n, cin, 1, plane, cout, 1, 1, 1, 1, 1, 0, 0, 1, plane, res, activation, alpha, beta);
             float[] packed = Nhwc.PackDense(weights, cout, cin, 1);
             float[] actual = new float[expected.Length];
-            Nhwc.Pointwise(ToNhwc(input, n, cin, plane), packed, bias, actual, n * plane, cin, cout,
-                res is null ? [] : ToNhwc(res, n, cout, plane), activation, alpha, beta, 3);
+            float[] nhwcIn = ToNhwc(input, n, cin, plane);
+            ReadOnlySpan<float> nhwcRes = res is null ? [] : ToNhwc(res, n, cout, plane);
+            Nhwc.Pointwise(nhwcIn, packed, bias, actual, n * plane, cin, cout,
+                nhwcRes, activation, alpha, beta, 3);
             AssertClose(expected, ToNchw(actual, n, cout, plane), 1e-4f, 1e-4f);
+            float[] scalar = new float[expected.Length];
+            Nhwc.PointwiseScalar(nhwcIn, packed, bias, scalar, n * plane, cin, cout,
+                nhwcRes, activation, alpha, beta, 3);
+            AssertClose(expected, ToNchw(scalar, n, cout, plane), 1e-4f, 1e-4f);
         }
         finally
         {
@@ -151,9 +159,15 @@ public class NhwcKernelTests
         float[] expected = ConvRef(input, weights, bias, n, cin, h, w, cout, 1, kh, kw, sh, sw, pt, pl, oh, ow, res, NhwcActivation.Relu);
         float[] packed = Nhwc.PackDense(weights, cout, cin, kh * kw);
         float[] actual = new float[expected.Length];
-        Nhwc.Dense(ToNhwc(input, n, cin, h * w), packed, bias, actual, n, cin, h, w, cout, oh, ow, kh, kw, sh, sw, pt, pl,
-            ToNhwc(res, n, cout, oh * ow), NhwcActivation.Relu, 0, 0, 3);
+        float[] nhwcIn = ToNhwc(input, n, cin, h * w);
+        float[] nhwcRes = ToNhwc(res, n, cout, oh * ow);
+        Nhwc.Dense(nhwcIn, packed, bias, actual, n, cin, h, w, cout, oh, ow, kh, kw, sh, sw, pt, pl,
+            nhwcRes, NhwcActivation.Relu, 0, 0, 3);
         AssertClose(expected, ToNchw(actual, n, cout, oh * ow), 1e-4f, 1e-4f);
+        float[] scalar = new float[expected.Length];
+        Nhwc.DenseScalar(nhwcIn, packed, bias, scalar, n, cin, h, w, cout, oh, ow, kh, kw, sh, sw, pt, pl,
+            nhwcRes, NhwcActivation.Relu, 0, 0, 3);
+        AssertClose(expected, ToNchw(scalar, n, cout, oh * ow), 1e-4f, 1e-4f);
 
         // Force several flattened-K blocks that straddle tap boundaries.
         int savedKc = Nhwc.DenseKc;
@@ -161,9 +175,13 @@ public class NhwcKernelTests
         try
         {
             float[] blocked = new float[expected.Length];
-            Nhwc.Dense(ToNhwc(input, n, cin, h * w), packed, bias, blocked, n, cin, h, w, cout, oh, ow, kh, kw, sh, sw, pt, pl,
-                ToNhwc(res, n, cout, oh * ow), NhwcActivation.Relu, 0, 0, 3);
+            Nhwc.Dense(nhwcIn, packed, bias, blocked, n, cin, h, w, cout, oh, ow, kh, kw, sh, sw, pt, pl,
+                nhwcRes, NhwcActivation.Relu, 0, 0, 3);
             AssertClose(expected, ToNchw(blocked, n, cout, oh * ow), 1e-4f, 1e-4f);
+            float[] blockedScalar = new float[expected.Length];
+            Nhwc.DenseScalar(nhwcIn, packed, bias, blockedScalar, n, cin, h, w, cout, oh, ow, kh, kw, sh, sw, pt, pl,
+                nhwcRes, NhwcActivation.Relu, 0, 0, 3);
+            AssertClose(expected, ToNchw(blockedScalar, n, cout, oh * ow), 1e-4f, 1e-4f);
         }
         finally
         {
@@ -188,9 +206,15 @@ public class NhwcKernelTests
         float[] expected = ConvRef(input, weights, bias, n, c, h, w, c, c, kh, kw, sh, sw, pt, pl, oh, ow, res, NhwcActivation.HardSwish, alpha, beta);
         float[] packed = Nhwc.PackDepthwise(weights, c, kh * kw);
         float[] actual = new float[expected.Length];
-        Nhwc.Depthwise(ToNhwc(input, n, c, h * w), packed, bias, actual, n, c, h, w, oh, ow, kh, kw, sh, sw, pt, pl,
-            ToNhwc(res, n, c, oh * ow), NhwcActivation.HardSwish, alpha, beta, 3);
+        float[] nhwcIn = ToNhwc(input, n, c, h * w);
+        float[] nhwcRes = ToNhwc(res, n, c, oh * ow);
+        Nhwc.Depthwise(nhwcIn, packed, bias, actual, n, c, h, w, oh, ow, kh, kw, sh, sw, pt, pl,
+            nhwcRes, NhwcActivation.HardSwish, alpha, beta, 3);
         AssertClose(expected, ToNchw(actual, n, c, oh * ow), 1e-4f, 1e-4f);
+        float[] scalar = new float[expected.Length];
+        Nhwc.DepthwiseScalar(nhwcIn, packed, bias, scalar, n, c, h, w, oh, ow, kh, kw, sh, sw, pt, pl,
+            nhwcRes, NhwcActivation.HardSwish, alpha, beta, 3);
+        AssertClose(expected, ToNchw(scalar, n, c, oh * ow), 1e-4f, 1e-4f);
     }
 
     [Theory]

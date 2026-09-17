@@ -15,17 +15,8 @@ internal static partial class MatMul
 {
     internal static bool CanFuseArgMax(int rows, int inner, int columns, float[]? packedWeights)
     {
-        if (packedWeights is null || inner < 64 || columns < 1024 || rows < 1)
-            return false;
-#if !NETSTANDARD2_0
-        if (Avx512F.IsSupported && rows >= 8 && (rows & 7) == 0)
-            return true;
-        else if (Avx2.IsSupported && rows >= 4 && (rows & 3) == 0)
-            return true;
-        else
-#endif
-        return Vector.IsHardwareAccelerated && Vector<float>.Count > 0 &&
-            (16 % Vector<float>.Count) == 0;
+        _ = packedWeights;
+        return inner >= 64 && columns >= 1024 && rows >= 1;
     }
 
     internal static bool TryArgMax(ReadOnlySpan<float> input,
@@ -38,13 +29,13 @@ internal static partial class MatMul
             return false;
         if (!bias.IsEmpty && bias.Length != columns) return false;
         #if !NETSTANDARD2_0
-        if (Avx512F.IsSupported && rows >= 8 && (rows & 7) == 0)
+        if (packedWeights is not null && Avx512F.IsSupported && rows >= 8 && (rows & 7) == 0)
         {
             MatMulArgMaxPackedAvx512(input, weights, packedWeights, bias,
                 indices, scores, batch, rows, inner, columns);
             return true;
         }
-        else if (Avx2.IsSupported && rows >= 4 && (rows & 3) == 0)
+        else if (packedWeights is not null && Avx2.IsSupported && rows >= 4 && (rows & 3) == 0)
         {
             MatMulArgMaxPackedAvx(input, weights, packedWeights, bias,
                 indices, scores, batch, rows, inner, columns);
@@ -52,14 +43,132 @@ internal static partial class MatMul
         }
         else
         #endif
-        if (Vector.IsHardwareAccelerated && (16 % Vector<float>.Count) == 0)
+        if (packedWeights is not null && Vector.IsHardwareAccelerated && (16 % Vector<float>.Count) == 0)
         {
             MatMulArgMaxPackedVector(input, weights, packedWeights!, bias,
                 indices, scores, batch, rows, inner, columns);
             return true;
         }
 
-        return false;
+        MatMulArgMaxScalar(input, weights, bias, indices, scores, batch, rows, inner, columns);
+        return true;
+    }
+
+    [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+    private static unsafe void MatMulArgMaxScalar(ReadOnlySpan<float> input,
+        ReadOnlySpan<float> weights, ReadOnlySpan<float> bias,
+        Span<int> indices, Span<float> scores, int batch, int rows,
+        int inner, int columns)
+    {
+        bool hasBias = !bias.IsEmpty;
+        fixed (float* inputPtr = input, weightsPtr = weights)
+        {
+            for (int b = 0; b < batch; b++)
+            {
+                int row = 0;
+                for (; row <= rows - 4; row += 4)
+                {
+                    float m0 = float.NegativeInfinity, m1 = float.NegativeInfinity;
+                    float m2 = float.NegativeInfinity, m3 = float.NegativeInfinity;
+                    int i0 = 0, i1 = 0, i2 = 0, i3 = 0;
+                    int col = 0;
+                    for (; col <= columns - 4; col += 4)
+                    {
+                        float a00 = hasBias ? bias[col] : 0, a01 = hasBias ? bias[col + 1] : 0;
+                        float a02 = hasBias ? bias[col + 2] : 0, a03 = hasBias ? bias[col + 3] : 0;
+                        float a10 = a00, a11 = a01, a12 = a02, a13 = a03;
+                        float a20 = a00, a21 = a01, a22 = a02, a23 = a03;
+                        float a30 = a00, a31 = a01, a32 = a02, a33 = a03;
+                        int inputBase = (b * rows + row) * inner;
+                        float* weightCursor = weightsPtr + col;
+                        for (int k = 0; k < inner; k++)
+                        {
+                            float v0 = inputPtr[inputBase + k];
+                            float v1 = inputPtr[inputBase + inner + k];
+                            float v2 = inputPtr[inputBase + inner * 2 + k];
+                            float v3 = inputPtr[inputBase + inner * 3 + k];
+                            float w0 = weightCursor[0], w1 = weightCursor[1], w2 = weightCursor[2], w3 = weightCursor[3];
+                            a00 += v0 * w0; a01 += v0 * w1; a02 += v0 * w2; a03 += v0 * w3;
+                            a10 += v1 * w0; a11 += v1 * w1; a12 += v1 * w2; a13 += v1 * w3;
+                            a20 += v2 * w0; a21 += v2 * w1; a22 += v2 * w2; a23 += v2 * w3;
+                            a30 += v3 * w0; a31 += v3 * w1; a32 += v3 * w2; a33 += v3 * w3;
+                            weightCursor += columns;
+                        }
+                        UpdateArgMax(a00, col, ref m0, ref i0);
+                        UpdateArgMax(a01, col + 1, ref m0, ref i0);
+                        UpdateArgMax(a02, col + 2, ref m0, ref i0);
+                        UpdateArgMax(a03, col + 3, ref m0, ref i0);
+                        UpdateArgMax(a10, col, ref m1, ref i1);
+                        UpdateArgMax(a11, col + 1, ref m1, ref i1);
+                        UpdateArgMax(a12, col + 2, ref m1, ref i1);
+                        UpdateArgMax(a13, col + 3, ref m1, ref i1);
+                        UpdateArgMax(a20, col, ref m2, ref i2);
+                        UpdateArgMax(a21, col + 1, ref m2, ref i2);
+                        UpdateArgMax(a22, col + 2, ref m2, ref i2);
+                        UpdateArgMax(a23, col + 3, ref m2, ref i2);
+                        UpdateArgMax(a30, col, ref m3, ref i3);
+                        UpdateArgMax(a31, col + 1, ref m3, ref i3);
+                        UpdateArgMax(a32, col + 2, ref m3, ref i3);
+                        UpdateArgMax(a33, col + 3, ref m3, ref i3);
+                    }
+                    for (; col < columns; col++)
+                    {
+                        float s0 = hasBias ? bias[col] : 0, s1 = s0, s2 = s0, s3 = s0;
+                        int inputBase = (b * rows + row) * inner;
+                        for (int k = 0; k < inner; k++)
+                        {
+                            float w = weightsPtr[k * columns + col];
+                            s0 += inputPtr[inputBase + k] * w;
+                            s1 += inputPtr[inputBase + inner + k] * w;
+                            s2 += inputPtr[inputBase + inner * 2 + k] * w;
+                            s3 += inputPtr[inputBase + inner * 3 + k] * w;
+                        }
+                        UpdateArgMax(s0, col, ref m0, ref i0);
+                        UpdateArgMax(s1, col, ref m1, ref i1);
+                        UpdateArgMax(s2, col, ref m2, ref i2);
+                        UpdateArgMax(s3, col, ref m3, ref i3);
+                    }
+                    int outputRow = b * rows + row;
+                    WriteArgMax(indices, scores, outputRow, i0, m0);
+                    WriteArgMax(indices, scores, outputRow + 1, i1, m1);
+                    WriteArgMax(indices, scores, outputRow + 2, i2, m2);
+                    WriteArgMax(indices, scores, outputRow + 3, i3, m3);
+                }
+                for (; row < rows; row++)
+                {
+                    float max = float.NegativeInfinity;
+                    int best = 0;
+                    int inputBase = (b * rows + row) * inner;
+                    for (int col = 0; col < columns; col++)
+                    {
+                        float sum = hasBias ? bias[col] : 0;
+                        for (int k = 0; k < inner; k++)
+                            sum += inputPtr[inputBase + k] * weightsPtr[k * columns + col];
+                        UpdateArgMax(sum, col, ref max, ref best);
+                    }
+                    WriteArgMax(indices, scores, b * rows + row, best, max);
+                }
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void UpdateArgMax(float value, int column, ref float max, ref int best)
+    {
+        if (!MathCompat.IsFinite(value))
+            throw new InvalidDataException("Recognizer output is invalid.");
+        if (value > max)
+        {
+            max = value;
+            best = column;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteArgMax(Span<int> indices, Span<float> scores, int row, int index, float score)
+    {
+        indices[row] = index;
+        scores[row] = score;
     }
 
     private static unsafe void FinishScalarTail(float* input, float* weights,

@@ -316,23 +316,117 @@ internal static unsafe partial class Nhwc
     private static void NhwcToNchwScalar(ReadOnlySpan<float> source, Span<float> destination, int batch, int channels, int plane, int threads)
         => NhwcToNchwVec(source, destination, batch, channels, plane, threads);
 
-    private static void PoolScalar(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
-        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft, bool max,
-        int threads = 1)
-        => PoolVec(input, output, batch, channels, height, width, outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft, max, threads);
-
     private static void ResizeNearestScalar(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
         int factorH, int factorW, int threads = 1)
         => ResizeNearestVec(input, output, batch, channels, height, width, factorH, factorW, threads);
 
+    private static void PoolScalar(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int height, int width,
+        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft, bool max,
+        int threads = 1)
+    {
+        long outVolume = (long)batch * outputHeight * outputWidth * channels;
+        if (input.Length < (long)batch * height * width * channels || output.Length < outVolume)
+            throw new ArgumentException("NHWC pool buffer too small.");
+        if (outVolume == 0) return;
+        int rowsTotal = batch * outputHeight;
+        int workers = threads > 1 && outVolume >= 1 << 18 ? Math.Min(threads, rowsTotal) : 1;
+        fixed (float* inPtr = input, outPtr = output)
+        {
+            nint inA = (nint)inPtr, outA = (nint)outPtr;
+            void Worker(int worker)
+            {
+                int rowBegin = (int)((long)rowsTotal * worker / workers), rowEnd = (int)((long)rowsTotal * (worker + 1) / workers);
+                for (int row = rowBegin; row < rowEnd; row++)
+                {
+                    int b = row / outputHeight, y = row - b * outputHeight;
+                    float* inBatch = (float*)inA + (long)b * height * width * channels;
+                    int iy0 = y * strideH - padTop;
+                    int kyBegin = Math.Max(0, -iy0), kyEnd = Math.Min(kernelH, height - iy0);
+                    for (int x = 0; x < outputWidth; x++)
+                    {
+                        int ix0 = x * strideW - padLeft;
+                        int kxBegin = Math.Max(0, -ix0), kxEnd = Math.Min(kernelW, width - ix0);
+                        float* dst = (float*)outA + (((long)b * outputHeight + y) * outputWidth + x) * channels;
+                        int count = Math.Max(0, kyEnd - kyBegin) * Math.Max(0, kxEnd - kxBegin);
+                        if (count == 0)
+                        {
+                            float fill = max ? float.NegativeInfinity : float.NaN;
+                            for (int ch = 0; ch < channels; ch++) dst[ch] = fill;
+                            continue;
+                        }
+                        for (int c = 0; c < channels; c++)
+                        {
+                            float acc = max ? float.NegativeInfinity : 0f;
+                            for (int ky = kyBegin; ky < kyEnd; ky++)
+                                for (int kx = kxBegin; kx < kxEnd; kx++)
+                                {
+                                    float v = inBatch[((long)(iy0 + ky) * width + ix0 + kx) * channels + c];
+                                    acc = max ? MathF.Max(acc, v) : acc + v;
+                                }
+                            dst[c] = max ? acc : acc / count;
+                        }
+                    }
+                }
+            }
+            if (workers > 1) Parallel.For(0, workers, Worker);
+            else Worker(0);
+        }
+    }
+
     private static void ReduceMeanSpatialScalar(ReadOnlySpan<float> input, Span<float> output, int batch, int channels, int plane)
-        => ReduceMeanSpatialVec(input, output, batch, channels, plane);
+    {
+        if (input.Length < (long)batch * channels * plane || output.Length < (long)batch * channels)
+            throw new ArgumentException("NHWC reduce buffer too small.");
+        if (plane <= 0) { output.Slice(0, batch * channels).Clear(); return; }
+        fixed (float* inPtr = input, outPtr = output)
+        {
+            for (int b = 0; b < batch; b++)
+            {
+                float* src = inPtr + (long)b * plane * channels;
+                float* dst = outPtr + (long)b * channels;
+                new Span<float>(dst, channels).Clear();
+                for (int p = 0; p < plane; p++, src += channels)
+                    for (int c = 0; c < channels; c++) dst[c] += src[c];
+                float inv = plane;
+                for (int c = 0; c < channels; c++) dst[c] /= inv;
+            }
+        }
+    }
 
     private static void BinaryChannelScalar<TOp>(ReadOnlySpan<float> left, ReadOnlySpan<float> channel, Span<float> output,
         int batch, int channels, int plane, bool channelIsLeft, bool channelPerBatch) where TOp : struct, IBinaryOp
-        => BinaryChannelVec<TOp>(left, channel, output, batch, channels, plane, channelIsLeft, channelPerBatch);
+    {
+        long volume = (long)batch * plane * channels;
+        if (left.Length < volume || output.Length < volume || channel.Length < (channelPerBatch ? (long)batch * channels : channels))
+            throw new ArgumentException("NHWC channel broadcast buffer too small.");
+        TOp op = default;
+        fixed (float* aPtr = left, cPtr = channel, oPtr = output)
+        {
+            for (int b = 0; b < batch; b++)
+            {
+                float* ch = cPtr + (channelPerBatch ? (long)b * channels : 0);
+                float* a = aPtr + (long)b * plane * channels;
+                float* o = oPtr + (long)b * plane * channels;
+                for (int p = 0; p < plane; p++, a += channels, o += channels)
+                    for (int c = 0; c < channels; c++)
+                        o[c] = channelIsLeft ? op.Apply(ch[c], a[c]) : op.Apply(a[c], ch[c]);
+            }
+        }
+    }
 
     private static void BatchNormScalar(ReadOnlySpan<float> input, Span<float> output, int pixels, int channels,
         ReadOnlySpan<float> scale, ReadOnlySpan<float> bias, ReadOnlySpan<float> mean, ReadOnlySpan<float> variance, float epsilon)
-        => BatchNormVec(input, output, pixels, channels, scale, bias, mean, variance, epsilon);
+    {
+        if (input.Length < (long)pixels * channels || output.Length < (long)pixels * channels ||
+            scale.Length < channels || bias.Length < channels || mean.Length < channels || variance.Length < channels)
+            throw new ArgumentException("NHWC batch-norm buffer too small.");
+        float[] k = new float[channels];
+        for (int c = 0; c < channels; c++) k[c] = scale[c] / MathF.Sqrt(variance[c] + epsilon);
+        for (int p = 0; p < pixels; p++)
+        {
+            int baseIndex = p * channels;
+            for (int c = 0; c < channels; c++)
+                output[baseIndex + c] = (input[baseIndex + c] - mean[c]) * k[c] + bias[c];
+        }
+    }
 }

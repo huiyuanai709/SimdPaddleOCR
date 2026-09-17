@@ -1,8 +1,12 @@
 # Sdcb.SimdPaddleOCR 性能基准
 
+## 1.4（未发布）
+
+把 NHWC 扩到 ns2、无 HW intrinsic 的 x64（专用 scalar tile），以及图输入直接标 NHWC；net10 AdvSIMD 与 `PPOCR_NHWC=0` 仍是 NCHW。公开 `InferenceSession.Run` 仍收逻辑 NCHW，入口自动转置。下面 1.3 本机表和 CI 表仍是 `37fe1fd` 的数，不要当成 1.4。
+
 ## 1.3（2026-09-14）
 
-核心包 **1.3.0**（`37fe1fd`）。AVX2+FMA 上对连续卷积段走图级 NHWC；`netstandard2.0` / ARM / `PPOCR_NHWC=0` 仍是 NCHW。
+核心包 **1.3.0**（`37fe1fd`）只在 **AVX2+FMA** 上对连续卷积段走图级 NHWC；当时 ns2 / ARM / `PPOCR_NHWC=0` 仍是 NCHW。
 
 ### 本机引擎对比（tiny / small / medium）
 

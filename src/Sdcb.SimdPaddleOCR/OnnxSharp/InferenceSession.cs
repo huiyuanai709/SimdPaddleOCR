@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Numerics;
@@ -69,9 +70,19 @@ public sealed partial class InferenceSession : IDisposable
     internal bool PlanForCtcProjection { get; set; }
 
     /// <summary>
+    /// True when the graph input is stored channels-last. Internal writers
+    /// (<see cref="PaddleOcrDetector"/> / Classifier / Recognizer) must write
+    /// NHWC into <see cref="InputData"/> and call <see cref="RunInternal"/> so
+    /// the first LayoutConvert is skipped. Public <see cref="Run"/> still
+    /// accepts logical NCHW and transposes at the entry.
+    /// </summary>
+    internal bool InputIsNhwc => _compiled.InputIsNhwc;
+
+    /// <summary>
     /// Graph-input window inside the planned activation workspace (after
-    /// <see cref="Reshape"/>). Callers may write NCHW here and Run without a
-    /// second input allocation; it is not a separate buffer.
+    /// <see cref="Reshape"/>). Physical layout follows <see cref="InputIsNhwc"/>:
+    /// write NHWC when that flag is set, otherwise NCHW. Not a public buffer;
+    /// pair it with <see cref="RunInternal"/>, not <see cref="Run"/>.
     /// </summary>
     internal Span<float> InputData
     {
@@ -468,6 +479,14 @@ public sealed partial class InferenceSession : IDisposable
             throw new InvalidOperationException("The session has no input shape; call Reshape first.");
     }
 
+    /// <summary>
+    /// Runs the graph. <paramref name="input"/> is logical NCHW. 1.3 graph
+    /// inputs were always stored NCHW; 1.4 may mark them NHWC, and this entry
+    /// transposes into the workspace so the public buffer layout does not
+    /// change. Callers that already wrote physical NHWC into
+    /// <see cref="InputData"/> must use <see cref="RunInternal"/> instead —
+    /// that path does not convert.
+    /// </summary>
     public void Run(ReadOnlySpan<float> input, Span<float> output)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(InferenceSession));
@@ -475,7 +494,8 @@ public sealed partial class InferenceSession : IDisposable
         input = EnsureFullPlan(input);
         TensorValue inputTensor = _tensors[_inputIndex]; TensorValue outputTensor = _tensors[_outputIndex];
         if (input.Length != inputTensor.Length || output.Length < outputTensor.Length) throw new ArgumentException("Input/output buffer size mismatch.");
-        Execute(input);
+        BindPublicInput(input, inputTensor);
+        Execute(input, inputAlreadyBound: true);
         outputTensor.Data.CopyTo(output);
     }
 
@@ -648,7 +668,7 @@ public sealed partial class InferenceSession : IDisposable
     public float[] Run(ReadOnlySpan<float> input)
     {
         float[] output = new float[checked((int)OutputShape.ElementCount)];
-        RunInternal(input).CopyTo(output);
+        Run(input, output);
         return output;
     }
 
@@ -796,6 +816,45 @@ public sealed partial class InferenceSession : IDisposable
         // Preprocess may write straight into the planned graph-input window.
         if (!input.Overlaps(dest))
             input.CopyTo(dest);
+    }
+
+    /// <summary>
+    /// Public <see cref="Run"/> bind: <paramref name="input"/> is logical NCHW.
+    /// Internal writers that already stored physical NHWC in the workspace
+    /// must not come through here.
+    /// </summary>
+    private void BindPublicInput(ReadOnlySpan<float> input, TensorValue inputTensor)
+    {
+        Span<float> dest = inputTensor.Data;
+        if (input.Length != dest.Length)
+            throw new ArgumentException("Input buffer size mismatch.");
+        if (!InputIsNhwc)
+        {
+            if (!input.Overlaps(dest))
+                input.CopyTo(dest);
+            return;
+        }
+
+        int[] shape = inputTensor.Shape;
+        if (shape.Length != 4)
+            throw new InvalidOperationException("NHWC graph input must be rank-4.");
+        int n = shape[0], c = shape[1], plane = checked(shape[2] * shape[3]);
+        if (!input.Overlaps(dest))
+        {
+            Nhwc.NchwToNhwc(input, dest, n, c, plane, _intraOpThreads);
+            return;
+        }
+
+        float[] tmp = ArrayPool<float>.Shared.Rent(dest.Length);
+        try
+        {
+            input.CopyTo(tmp.AsSpan(0, dest.Length));
+            Nhwc.NchwToNhwc(tmp.AsSpan(0, dest.Length), dest, n, c, plane, _intraOpThreads);
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(tmp);
+        }
     }
 
     private void Execute(ReadOnlySpan<float> input, bool inputAlreadyBound = false,

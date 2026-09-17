@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Numerics;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
@@ -21,12 +20,10 @@ internal static class LayoutPlanner
     public const ushort ToNhwc = 1, ToNchw = 2;
 
     /// <summary>
-    /// NHWC kernels exist for AVX-512, AVX2+FMA, and Vector&lt;float&gt;
-    /// widths 4 and 8. Other ISAs keep the NCHW graph unchanged: a Count != 4/8
-    /// Vector path would hit the scalar NHWC fallback and lose the NCHW
-    /// Vector/AdvSIMD kernels. net10 ARM stays NCHW — AdvSIMD measured faster
-    /// than the Count==4 NHWC Vector path (linux-arm64 tiny-4w ~230 vs ~286).
-    /// ns2 ARM still opens NHWC (no AdvSIMD NCHW kernels).
+    /// NHWC kernels exist for AVX-512, AVX2+FMA, Vector&lt;float&gt; widths
+    /// 4/8, and a dedicated scalar tile path. net10 ARM stays NCHW — AdvSIMD
+    /// measured faster than the Count==4 NHWC Vector path (linux-arm64 tiny-4w
+    /// ~230 vs ~286). ns2 ARM still opens NHWC (no AdvSIMD NCHW kernels).
     /// </summary>
     public static bool IsEnabled { get; } = ComputeEnabled();
 
@@ -38,7 +35,7 @@ internal static class LayoutPlanner
         if (Avx2.IsSupported && Fma.IsSupported) return true;
         if (AdvSimd.IsSupported) return false;
 #endif
-        return Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4;
+        return true;
     }
 
     public static void Apply(ref TensorRecord[] tensors, ref NodeRecord[] nodes,
@@ -74,6 +71,7 @@ internal static class LayoutPlanner
         private readonly List<byte[]> _tensorData;
         private readonly List<byte[]> _parameters;
         private readonly NodeRecord[] _source;
+        private readonly uint[] _graphInputs;
         private readonly List<NodeRecord> _nodes = [];
         private readonly HashSet<uint> _outputs;
         private readonly Dictionary<uint, uint> _toNhwc = [], _toNchw = [];
@@ -86,8 +84,8 @@ internal static class LayoutPlanner
             _tensorData = [.. tensorData];
             _parameters = [.. nodeParameters];
             _source = nodes;
+            _graphInputs = graphInputs;
             _outputs = [.. graphOutputs];
-            _ = graphInputs;
         }
 
         public TensorRecord[] Tensors => [.. _tensors];
@@ -97,6 +95,7 @@ internal static class LayoutPlanner
 
         public void Run()
         {
+            MarkNhwcGraphInputs();
             foreach (NodeRecord node in _source)
             {
                 bool nhwcMode = NhwcCapable(node) && WantsNhwc(node);
@@ -130,6 +129,41 @@ internal static class LayoutPlanner
                 _tensors[index] = _tensors[index] with { Flags = _tensors[index].Flags | Model.TensorNhwc };
                 _nodes.Add(rewritten);
             }
+        }
+
+        // Preprocess writes NHWC when the first consumer would convert the
+        // graph input anyway (dense conv / conv-transpose start of a segment).
+        private void MarkNhwcGraphInputs()
+        {
+            foreach (uint input in _graphInputs)
+            {
+                if (input == uint.MaxValue || Rank(input) != 4 || IsNeutral(input) || IsConstant(input))
+                    continue;
+                foreach (NodeRecord node in _source)
+                {
+                    bool uses = false;
+                    foreach (uint t in node.Inputs)
+                    {
+                        if (t == input) { uses = true; break; }
+                    }
+                    if (!uses) continue;
+                    if (NhwcCapable(node) && StartsNhwcSegment(node))
+                    {
+                        int index = checked((int)input);
+                        _tensors[index] = _tensors[index] with { Flags = _tensors[index].Flags | Model.TensorNhwc };
+                        _nhwc.Add(input);
+                    }
+                    break;
+                }
+            }
+        }
+
+        private bool StartsNhwcSegment(NodeRecord node)
+        {
+            if (node.Operator == OperatorId.ConvTranspose) return true;
+            if (node.Operator != OperatorId.Conv) return false;
+            ReadOnlySpan<byte> p = _parameters[checked((int)node.ParameterIndex)];
+            return BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(4)) == 1;
         }
 
         private NodeRecord RewriteInputs(NodeRecord node, bool wantNhwc)

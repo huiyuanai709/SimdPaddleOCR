@@ -68,7 +68,7 @@ public sealed class PaddleOcrClassifier : IDisposable
             Span<float> input = session.InputData;
             long started = profile ? PipelineProfiler.Now() : 0;
             int resizedWidth = PPOCRPreprocess.ClsBgrToNchw(source, sourceWidth, sourceHeight, sourceStride,
-                input, session.ResizeWorkspace);
+                input, session.ResizeWorkspace, session.InputIsNhwc);
             if (profile) PipelineProfiler.Add(PipelineProfiler.ClsPreprocess, started);
             started = profile ? PipelineProfiler.Now() : 0;
             ReadOnlySpan<float> output = session.RunInternal(input);

@@ -30,6 +30,7 @@
     <ProjectReference Include="..\..\src\Sdcb.SimdPaddleOCR\Sdcb.SimdPaddleOCR.csproj">
       <SetTargetFramework Condition="'$(UseNs20Library)' == 'true'">TargetFramework=netstandard2.0</SetTargetFramework>
     </ProjectReference>
+    <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.TextLineOrientation\Sdcb.SimdPaddleOCR.Models.TextLineOrientation.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

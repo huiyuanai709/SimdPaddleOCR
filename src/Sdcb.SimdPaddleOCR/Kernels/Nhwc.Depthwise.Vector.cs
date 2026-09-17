@@ -474,10 +474,49 @@ internal static unsafe partial class Nhwc
         }
     }
 
-    private static void DepthwiseScalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+    internal static void DepthwiseScalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
         Span<float> output, int batch, int channels, int height, int width, int outputHeight, int outputWidth,
         int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
-        => DepthwiseVec(input, packedWeights, bias, output, batch, channels, height, width, outputHeight, outputWidth,
-            kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
+    {
+        int taps = kernelH * kernelW;
+        if ((channels & 7) != 0 || channels <= 0 || taps <= 0 || strideH <= 0 || strideW <= 0)
+            throw new ArgumentException("NHWC depthwise convolution shape is not supported.");
+        long outVolume = (long)batch * outputHeight * outputWidth * channels;
+        if (input.Length < (long)batch * height * width * channels || output.Length < outVolume ||
+            packedWeights.Length < (long)taps * channels || (!bias.IsEmpty && bias.Length < channels) ||
+            (!residual.IsEmpty && residual.Length < outVolume))
+            throw new ArgumentException("NHWC depthwise convolution buffer too small.");
+        if (outVolume == 0) return;
+        int rowsTotal = batch * outputHeight;
+        int workers = threads > 1 && outVolume * taps >= 1_000_000 ? Math.Min(threads, rowsTotal) : 1;
+        fixed (float* inPtr = input, wPtr = packedWeights, bPtr = bias, outPtr = output, rPtr = residual)
+        {
+            nint inA = (nint)inPtr, wA = (nint)wPtr, bA = (nint)bPtr, outA = (nint)outPtr, rA = (nint)rPtr;
+            bool hasBias = !bias.IsEmpty, hasResidual = !residual.IsEmpty;
+            void Worker(int worker)
+            {
+                int rowBegin = (int)((long)rowsTotal * worker / workers);
+                int rowEnd = (int)((long)rowsTotal * (worker + 1) / workers);
+                float* inBase = (float*)inA, w = (float*)wA, outBase = (float*)outA;
+                float* biasBase = hasBias ? (float*)bA : null, resBase = hasResidual ? (float*)rA : null;
+                for (int row = rowBegin; row < rowEnd; row++)
+                {
+                    int b0 = row / outputHeight, y0 = row - b0 * outputHeight;
+                    float* inBatch0 = inBase + (long)b0 * height * width * channels;
+                    int iy0v = y0 * strideH - padTop;
+                    int kyBegin0 = Math.Max(0, -iy0v), kyEnd0 = Math.Min(kernelH, height - iy0v);
+                    long outRow0 = ((long)b0 * outputHeight + y0) * outputWidth;
+                    float* outRowPtr0 = outBase + outRow0 * channels;
+                    float* resRowPtr0 = resBase == null ? null : resBase + outRow0 * channels;
+                    for (int x = 0; x < outputWidth; x++)
+                        DepthwisePixelScalar(inBatch0, w, biasBase, outRowPtr0 + (long)x * channels,
+                            resRowPtr0 == null ? null : resRowPtr0 + (long)x * channels, channels, width,
+                            iy0v, x * strideW - padLeft, kernelW, taps, kyBegin0, kyEnd0, activation, alpha, beta);
+                }
+            }
+            if (workers > 1) Parallel.For(0, workers, Worker);
+            else Worker(0);
+        }
+    }
 }
