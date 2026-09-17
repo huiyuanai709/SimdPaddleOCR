@@ -47,6 +47,16 @@ public sealed class Model : IDisposable
         if ((uint)index >= (uint)_tensorData.Length) throw new ArgumentOutOfRangeException(nameof(index));
         return Volatile.Read(ref _disposed) != 0 ? throw new ObjectDisposedException(nameof(Model)) : _tensorData[index];
     }
+    /// <summary>
+    /// The constant's backing array itself (empty for activations). Shared
+    /// read-only with every <see cref="CompiledModel"/> so weights exist once
+    /// per process, not once per compiled model.
+    /// </summary>
+    internal byte[] GetTensorArray(int index)
+    {
+        if ((uint)index >= (uint)_tensorData.Length) throw new ArgumentOutOfRangeException(nameof(index));
+        return Volatile.Read(ref _disposed) != 0 ? throw new ObjectDisposedException(nameof(Model)) : _tensorData[index];
+    }
     internal ReadOnlySpan<byte> GetParameters(in NodeRecord node)
     {
         int index = checked((int)node.ParameterIndex);

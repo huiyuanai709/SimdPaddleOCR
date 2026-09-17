@@ -109,6 +109,10 @@ for (int i = 0; i < files.Length; i++)
 
 using IBenchEngine engine = BenchEngines.Create(engineName, modelType, workers, cAssetsDir);
 double wsLoaded = WorkingSetMb();
+GCMemoryInfo gcLoaded = GC.GetGCMemoryInfo();
+double gcHeapLoadedMb = gcLoaded.HeapSizeBytes / (1024d * 1024d);
+double gcCommittedLoadedMb = gcLoaded.TotalCommittedBytes / (1024d * 1024d);
+long allocatedAtLoad = GC.GetTotalAllocatedBytes(precise: true);
 double wsPeak = wsLoaded;
 Console.WriteLine(engine.LoadedMessage(wsLoaded));
 
@@ -147,6 +151,26 @@ for (int index = 0; index < decoded.Length; index++)
 JsonObject extra = engine.Extra;
 
 double wsLast = rows.Count > 0 ? rows[^1].WorkingSetMb : wsLoaded;
+// Split "last" into live managed heap vs. uncollected garbage / unmanaged.
+GCMemoryInfo gcBefore = GC.GetGCMemoryInfo();
+double gcHeapBeforeMb = gcBefore.HeapSizeBytes / (1024d * 1024d);
+double gcCommittedBeforeMb = gcBefore.TotalCommittedBytes / (1024d * 1024d);
+int gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2);
+GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+GC.WaitForPendingFinalizers();
+GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+GCMemoryInfo gcAfter = GC.GetGCMemoryInfo();
+double gcHeapAfterMb = gcAfter.HeapSizeBytes / (1024d * 1024d);
+double gcCommittedAfterMb = gcAfter.TotalCommittedBytes / (1024d * 1024d);
+double wsAfterGc = WorkingSetMb();
+double allocatedRunMb = (GC.GetTotalAllocatedBytes(precise: true) - allocatedAtLoad) / (1024d * 1024d);
+Console.WriteLine($"gc: heap={gcHeapLoadedMb:F1}->{gcHeapBeforeMb:F1}->{gcHeapAfterMb:F1}MB committed={gcCommittedLoadedMb:F1}->{gcCommittedBeforeMb:F1}->{gcCommittedAfterMb:F1}MB ws={wsLast:F1}->{wsAfterGc:F1}MB allocated={allocatedRunMb:F1}MB ({allocatedRunMb / Math.Max(1, rows.Count):F2}MB/img) collections g0={gen0} g1={gen1} g2={gen2}");
+if (Environment.GetEnvironmentVariable("PPOCR_BENCH_HOLD") is not null)
+{
+    // Keep the engine alive so dotnet-gcdump / dotnet-dump can attach.
+    Console.WriteLine($"holding pid={Environment.ProcessId}; press Enter to continue");
+    Console.ReadLine();
+}
 var meta = new JsonObject
 {
     ["mode"] = engineName,
@@ -166,6 +190,15 @@ var meta = new JsonObject
     ["working_set_mb_loaded"] = wsLoaded,
     ["working_set_mb_last"] = wsLast,
     ["working_set_mb_peak"] = wsPeak,
+    ["working_set_mb_after_gc"] = wsAfterGc,
+    ["gc_heap_mb_loaded"] = gcHeapLoadedMb,
+    ["gc_heap_mb_last"] = gcHeapBeforeMb,
+    ["gc_heap_mb_after_gc"] = gcHeapAfterMb,
+    ["gc_committed_mb_loaded"] = gcCommittedLoadedMb,
+    ["gc_committed_mb_last"] = gcCommittedBeforeMb,
+    ["gc_committed_mb_after_gc"] = gcCommittedAfterMb,
+    ["gc_allocated_mb_run"] = allocatedRunMb,
+    ["gc_collections"] = $"{gen0}/{gen1}/{gen2}",
 };
 foreach ((string key, JsonNode? value) in extra)
     meta[key] = value?.DeepClone();

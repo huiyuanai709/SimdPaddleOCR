@@ -19,6 +19,7 @@ public sealed class CompiledModel
     private readonly int _intraOpThreads;
     private readonly byte[] _fusedSkip;
     private readonly int[] _inplaceSource;
+    private readonly int[] _phantomSink;
     private readonly int[]? _defaultInputShape;
     private readonly bool[] _nodeNhwc;
     private bool _disposed;
@@ -36,8 +37,10 @@ public sealed class CompiledModel
         _lastUse = new int[_tensors.Length];
         _fusedSkip = new byte[model.Nodes.Length];
         _inplaceSource = new int[_tensors.Length];
+        _phantomSink = new int[_tensors.Length];
         ArrayCompat.Fill(_lastUse, -1);
         ArrayCompat.Fill(_inplaceSource, -1);
+        ArrayCompat.Fill(_phantomSink, -1);
         for (int ni = 0; ni < model.Nodes.Length; ni++)
             foreach (uint input in model.Nodes[ni].Inputs)
                 _lastUse[checked((int)input)] = ni;
@@ -48,7 +51,7 @@ public sealed class CompiledModel
             TensorRecord t = model.Tensors[i];
             int[] dims = t.Dimensions.Take(checked((int)t.Rank)).ToArray();
             _tensors[i] = new TensorMeta((DType)t.DType, dims,
-                (t.Flags & Model.TensorConstant) != 0 ? model.GetTensorBytes(i) : [],
+                (t.Flags & Model.TensorConstant) != 0 ? model.GetTensorArray(i) : [],
                 (t.Flags & Model.TensorNhwc) != 0);
         }
         _nodeNhwc = new bool[model.Nodes.Length];
@@ -122,6 +125,12 @@ public sealed class CompiledModel
     internal bool IsNhwcNode(int nodeIndex) => _nodeNhwc[nodeIndex];
     internal bool IsNhwcTensor(uint tensorIndex) => _tensors[checked((int)tensorIndex)].IsNhwc;
     internal int ElementwiseInPlaceSource(int outputTensor) => _inplaceSource[outputTensor];
+    /// <summary>
+    /// Sink tensor whose storage a fusion-internal intermediate aliases, or -1.
+    /// Phantoms are never materialized (the fused kernel writes the sink
+    /// directly), so the workspace planner gives them no slot of their own.
+    /// </summary>
+    internal int PhantomSink(int tensorIndex) => _phantomSink[tensorIndex];
 
     // Same patterns InferenceSession fuses at runtime, decided once. Conv
     // fusions still write a later buffer while reading the conv input, so
@@ -137,6 +146,7 @@ public sealed class CompiledModel
             {
                 StretchLastUse(nodes[i].Inputs[0], i + 8);
                 _fusedSkip[i] = 8;
+                MarkPhantoms(i, 8);
                 i += 8;
                 continue;
             }
@@ -144,6 +154,7 @@ public sealed class CompiledModel
             {
                 _inplaceSource[checked((int)nodes[i + 4].Outputs[0])] = checked((int)nodes[i].Inputs[0]);
                 _fusedSkip[i] = 4;
+                MarkPhantoms(i, 4);
                 i += 4;
                 continue;
             }
@@ -155,6 +166,7 @@ public sealed class CompiledModel
             {
                 StretchLastUse(nodes[i].Inputs[0], i + 6);
                 _fusedSkip[i] = 6;
+                MarkPhantoms(i, 6);
                 i += 6;
                 continue;
             }
@@ -162,6 +174,7 @@ public sealed class CompiledModel
             {
                 StretchLastUse(nodes[i].Inputs[0], i + 1);
                 _fusedSkip[i] = 1;
+                MarkPhantoms(i, 1);
                 i += 1;
                 continue;
             }
@@ -169,6 +182,7 @@ public sealed class CompiledModel
             {
                 _inplaceSource[checked((int)nodes[i + 1].Outputs[0])] = checked((int)nodes[i].Inputs[0]);
                 _fusedSkip[i] = 1;
+                MarkPhantoms(i, 1);
                 i += 1;
                 continue;
             }
@@ -176,6 +190,7 @@ public sealed class CompiledModel
             {
                 StretchLastUse(nodes[i].Inputs[0], i + 2);
                 _fusedSkip[i] = 2;
+                MarkPhantoms(i, 2);
                 i += 2;
                 continue;
             }
@@ -183,6 +198,7 @@ public sealed class CompiledModel
             {
                 StretchLastUse(nodes[i].Inputs[0], i + 2);
                 _fusedSkip[i] = 2;
+                MarkPhantoms(i, 2);
                 i += 2;
                 continue;
             }
@@ -193,6 +209,10 @@ public sealed class CompiledModel
                 uint skip = nodes[i + 2].Inputs[0] == biasOut ? nodes[i + 2].Inputs[1] : nodes[i + 2].Inputs[0];
                 StretchLastUse(skip, i + 2);
                 _fusedSkip[i] = 2;
+                // NCHW may fall back to conv->biasAdd buffer then a separate
+                // residual Add (InferenceSession.TryExecuteConvBiasResidualAdd),
+                // so only the conv output is guaranteed unmaterialized there.
+                MarkPhantoms(i, _nodeNhwc[i] ? 2 : 1, sinkNode: i + 2);
                 i += 2;
                 continue;
             }
@@ -200,8 +220,33 @@ public sealed class CompiledModel
             {
                 StretchLastUse(nodes[i].Inputs[0], i + 1);
                 _fusedSkip[i] = 1;
+                MarkPhantoms(i, 1);
                 i += 1;
                 continue;
+            }
+        }
+    }
+
+    // Outputs of nodes [first, first+count) are only ever written through the
+    // fused kernel's sink (node first+skip output); they alias the sink's
+    // storage instead of taking their own workspace slot.
+    private void MarkPhantoms(int first, int count, int sinkNode = -1)
+    {
+        if (sinkNode < 0) sinkNode = first + count;
+        NodeRecord[] nodes = _model.Nodes;
+        if (nodes[sinkNode].Outputs.Length == 0) return;
+        int sink = checked((int)nodes[sinkNode].Outputs[0]);
+        if (_tensors[sink].IsConstant) return;
+        for (int ni = first; ni < first + count; ni++)
+        {
+            foreach (uint output in nodes[ni].Outputs)
+            {
+                int index = checked((int)output);
+                if (index == sink || _tensors[index].IsConstant) continue;
+                // Never consumed outside the fused group (match conditions
+                // guarantee this; the check is defensive).
+                if (_lastUse[index] > sinkNode) continue;
+                _phantomSink[index] = sink;
             }
         }
     }
@@ -810,54 +855,46 @@ public sealed class CompiledModel
     {
         public DType DType;
         public int[] Shape;
-        public float[] Data;
+        /// <summary>
+        /// Constant bytes shared with <see cref="Model"/> (empty for activations).
+        /// Kernels read F32 constants through a float reinterpretation of this
+        /// array; nothing ever writes to it. The previous copy into a float[]
+        /// per CompiledModel doubled every weight (small ~30 MB, medium ~130 MB).
+        /// </summary>
+        public byte[] Constant;
         public bool IsConstant;
         /// <summary>Storage is channels-last (logical <see cref="Shape"/> stays NCHW).</summary>
         public bool IsNhwc;
-        private byte[] _constant;
-        public TensorMeta(DType d, int[] s, ReadOnlySpan<byte> c, bool nhwc = false)
+        public TensorMeta(DType d, int[] s, byte[] c, bool nhwc = false)
         {
             DType = d;
             Shape = s;
-            IsConstant = !c.IsEmpty;
+            IsConstant = c.Length != 0;
             IsNhwc = nhwc;
-            if (!IsConstant)
-            {
-                _constant = [];
-                Data = [];
-                return;
-            }
-            Data = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(c).ToArray();
-            // F32 tensors: once Data (the float[] the kernels actually consume)
-            // exists, _constant has no remaining reader -- GetIntegerValues only
-            // serves I64/I32 and returns empty for F32. The previous version kept
-            // the raw bytes unconditionally, storing every weight twice. This
-            // CompiledModel is shared across input shapes, so the saving is one
-            // copy of the F32 ONNX constants, not one copy per cached session.
-            _constant = d == DType.F32 ? [] : c.ToArray();
+            Constant = c;
         }
         public void Dispose()
         {
-            Data = [];
-            _constant = [];
+            Constant = [];
         }
         public long[] GetIntegerValues()
         {
             if (!IsConstant) return [];
+            byte[] constant = Constant;
             if (DType == DType.I64)
             {
-                if ((_constant.Length & 7) != 0) return [];
-                long[] result = new long[_constant.Length / 8];
+                if ((constant.Length & 7) != 0) return [];
+                long[] result = new long[constant.Length / 8];
                 for (int i = 0; i < result.Length; i++)
-                    result[i] = BinaryPrimitives.ReadInt64LittleEndian(_constant.AsSpan(i * 8, 8));
+                    result[i] = BinaryPrimitives.ReadInt64LittleEndian(constant.AsSpan(i * 8, 8));
                 return result;
             }
             if (DType == DType.I32)
             {
-                if ((_constant.Length & 3) != 0) return [];
-                long[] result = new long[_constant.Length / 4];
+                if ((constant.Length & 3) != 0) return [];
+                long[] result = new long[constant.Length / 4];
                 for (int i = 0; i < result.Length; i++)
-                    result[i] = BinaryPrimitives.ReadInt32LittleEndian(_constant.AsSpan(i * 4, 4));
+                    result[i] = BinaryPrimitives.ReadInt32LittleEndian(constant.AsSpan(i * 4, 4));
                 return result;
             }
             return [];

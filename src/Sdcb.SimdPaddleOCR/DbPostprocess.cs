@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
@@ -31,8 +32,6 @@ internal static class DbPostprocess
         byte[] bitmap = scratch.Bitmap;
         byte[] visited = scratch.Visited;
         int[] queue = scratch.Queue;
-        Point[] boundaryScratch = scratch.Boundary;
-        Point[] hullScratch = scratch.Hull;
         byte[] backgroundVisited = scratch.BackgroundVisited;
         Threshold.Binarize(prediction, bitmap, pixels, options.BitmapThreshold);
         if (options.UseDilation) Dilate2x2(bitmap, scratch.Dilated, mapWidth, mapHeight, pixels);
@@ -49,11 +48,11 @@ internal static class DbPostprocess
         {
             if (bitmap[start] == 0 || visited[start] != 0) continue;
             int boundaryCount = FillForeground(start, bitmap, visited, queue,
-                boundaryScratch, mapWidth, mapHeight, interior);
+                scratch, pixels, mapWidth, mapHeight, interior);
             if (boundaryCount < 3) continue;
             candidateCount++;
-            if (TryBuildDetection(boundaryScratch, boundaryCount, prediction,
-                mapWidth, mapHeight, options, sourceWidth, sourceHeight, hullScratch,
+            if (TryBuildDetection(scratch.Boundary, boundaryCount, prediction,
+                mapWidth, mapHeight, options, sourceWidth, sourceHeight, ref scratch.Hull,
                 corners, miniBoxScratch, expandedMiniBoxScratch, remappedCornersScratch,
                 out PaddleOcrDetectionBox detection))
                 found.Add(detection);
@@ -70,28 +69,28 @@ internal static class DbPostprocess
         // contours), preserving the official hollow-glyph behavior.
         for (int x = 0; x < mapWidth; x++)
         {
-            FillBackground(x, bitmap, backgroundVisited, queue, null,
+            FillBackground(x, bitmap, backgroundVisited, queue, null, pixels,
                 mapWidth, mapHeight, out _);
             if (mapHeight > 1) FillBackground((mapHeight - 1) * mapWidth + x,
-                bitmap, backgroundVisited, queue, null, mapWidth, mapHeight, out _);
+                bitmap, backgroundVisited, queue, null, pixels, mapWidth, mapHeight, out _);
         }
         for (int y = 1; y + 1 < mapHeight; y++)
         {
-            FillBackground(y * mapWidth, bitmap, backgroundVisited, queue, null,
+            FillBackground(y * mapWidth, bitmap, backgroundVisited, queue, null, pixels,
                 mapWidth, mapHeight, out _);
             if (mapWidth > 1) FillBackground(y * mapWidth + mapWidth - 1,
-                bitmap, backgroundVisited, queue, null, mapWidth, mapHeight, out _);
+                bitmap, backgroundVisited, queue, null, pixels, mapWidth, mapHeight, out _);
         }
 
         for (int start = 0; start < pixels && candidateCount < options.MaxCandidates; start++)
         {
             if (bitmap[start] != 0 || backgroundVisited[start] != 0) continue;
-            FillBackground(start, bitmap, backgroundVisited, queue, boundaryScratch,
+            FillBackground(start, bitmap, backgroundVisited, queue, scratch, pixels,
                 mapWidth, mapHeight, out int boundaryCount);
             if (boundaryCount < 3) continue;
             candidateCount++;
-            if (TryBuildDetection(boundaryScratch, boundaryCount, prediction,
-                mapWidth, mapHeight, options, sourceWidth, sourceHeight, hullScratch,
+            if (TryBuildDetection(scratch.Boundary, boundaryCount, prediction,
+                mapWidth, mapHeight, options, sourceWidth, sourceHeight, ref scratch.Hull,
                 corners, miniBoxScratch, expandedMiniBoxScratch, remappedCornersScratch,
                 out PaddleOcrDetectionBox detection))
                 found.Add(detection);
@@ -101,8 +100,10 @@ internal static class DbPostprocess
     }
 
     /// <summary>
-    /// Grow-only DB scratch sized to LimitSideLength² so every image reuses one
-    /// LOH size instead of pinning a unique bucket per map shape.
+    /// Grow-only DB scratch. Pixel maps and the scanline stack are sized to
+    /// the map (≤ LimitSideLength²) so every image reuses one LOH size; the
+    /// contour/hull point lists grow on demand instead — a text component's
+    /// boundary is thousands of points, not the 2×pixels worst case (22 MB).
     /// </summary>
     internal sealed class Workspace
     {
@@ -125,9 +126,22 @@ internal static class DbPostprocess
             if (Interior.Length < pixels) Interior = new byte[pixels];
             int queue = checked(3 * (pixels / 2 + 2));
             if (Queue.Length < queue) Queue = new int[queue];
-            if (Boundary.Length < pixels) Boundary = new Point[pixels];
-            int hull = checked(pixels * 2);
-            if (Hull.Length < hull) Hull = new Point[hull];
+        }
+
+        /// <summary>
+        /// Appends a boundary point, growing the list up to <paramref name="cap"/>
+        /// entries (the map's pixel count, i.e. the former fixed capacity).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void AddBoundary(ref int count, int x, int y, int cap)
+        {
+            if (count >= cap) return;
+            if (count == Boundary.Length)
+            {
+                int grown = Boundary.Length == 0 ? 1024 : checked(Boundary.Length * 2);
+                Array.Resize(ref Boundary, Math.Min(Math.Max(grown, count + 1), cap));
+            }
+            Boundary[count++] = new Point(x, y);
         }
     }
 
@@ -136,7 +150,7 @@ internal static class DbPostprocess
     // as the previous per-pixel BFS (each boundary pixel emitted exactly once;
     // the convex hull consumer is order-insensitive).
     private static int FillForeground(int start, byte[] bitmap, byte[] visited, int[] stack,
-        Point[] boundary, int mapWidth, int mapHeight, byte[]? interior)
+        Workspace scratch, int boundaryCap, int mapWidth, int mapHeight, byte[]? interior)
     {
         int boundaryCount = 0, top = 0;
         int seedY = start / mapWidth, seedX = start % mapWidth, seedRow = seedY * mapWidth;
@@ -154,14 +168,14 @@ internal static class DbPostprocess
             if (interior is not null)
             {
                 for (int x = left; x <= right; x++)
-                    if (interior[boundaryRow + x] == 0 && boundaryCount < boundary.Length)
-                        boundary[boundaryCount++] = new Point(x, y);
+                    if (interior[boundaryRow + x] == 0)
+                        scratch.AddBoundary(ref boundaryCount, x, y, boundaryCap);
             }
             else
             {
                 for (int x = left; x <= right; x++)
-                    if (IsBoundary(bitmap, mapWidth, mapHeight, x, y) && boundaryCount < boundary.Length)
-                        boundary[boundaryCount++] = new Point(x, y);
+                    if (IsBoundary(bitmap, mapWidth, mapHeight, x, y))
+                        scratch.AddBoundary(ref boundaryCount, x, y, boundaryCap);
             }
             int scanFrom = Math.Max(0, left - 1), scanTo = Math.Min(mapWidth - 1, right + 1);
             for (int direction = -1; direction <= 1; direction += 2)
@@ -193,7 +207,7 @@ internal static class DbPostprocess
     // neighbor) adjacency contributes one boundary entry at the background
     // pixel's coordinates, including duplicates.
     private static void FillBackground(int seed, byte[] bitmap, byte[] visited, int[] stack,
-        Point[]? boundary, int mapWidth, int mapHeight, out int boundaryCount)
+        Workspace? boundary, int boundaryCap, int mapWidth, int mapHeight, out int boundaryCount)
     {
         boundaryCount = 0;
         if (bitmap[seed] != 0 || visited[seed] != 0) return;
@@ -210,10 +224,10 @@ internal static class DbPostprocess
             if (boundary is not null)
             {
                 int row = y * mapWidth;
-                if (left > 0 && bitmap[row + left - 1] != 0 && boundaryCount < boundary.Length)
-                    boundary[boundaryCount++] = new Point(left, y);
-                if (right + 1 < mapWidth && bitmap[row + right + 1] != 0 && boundaryCount < boundary.Length)
-                    boundary[boundaryCount++] = new Point(right, y);
+                if (left > 0 && bitmap[row + left - 1] != 0)
+                    boundary.AddBoundary(ref boundaryCount, left, y, boundaryCap);
+                if (right + 1 < mapWidth && bitmap[row + right + 1] != 0)
+                    boundary.AddBoundary(ref boundaryCount, right, y, boundaryCap);
             }
             for (int direction = -1; direction <= 1; direction += 2)
             {
@@ -224,8 +238,7 @@ internal static class DbPostprocess
                 {
                     if (bitmap[row + x] != 0)
                     {
-                        if (boundary is not null && boundaryCount < boundary.Length)
-                            boundary[boundaryCount++] = new Point(x, y);
+                        boundary?.AddBoundary(ref boundaryCount, x, y, boundaryCap);
                         x++;
                     }
                     else if (visited[row + x] == 0)
@@ -245,13 +258,13 @@ internal static class DbPostprocess
 
     private static bool TryBuildDetection(Point[] contour, int count, ReadOnlySpan<float> prediction,
         int mapWidth, int mapHeight, PaddleOcrDetectorOptions options, int sourceWidth, int sourceHeight,
-        Point[] hullScratch, Span<Point> corners, Span<Point> miniBoxScratch,
+        ref Point[] hullScratch, Span<Point> corners, Span<Point> miniBoxScratch,
         Span<Point> expandedMiniBoxScratch, Span<Point> remappedCornersScratch,
         out PaddleOcrDetectionBox detection)
     {
         detection = default;
         if (count < 3) return false;
-        if (!TryMinimumRectangle(contour, count, hullScratch,
+        if (!TryMinimumRectangle(contour, count, ref hullScratch,
             out Rectangle rectangle, miniBoxScratch)) return false;
         float shortestSide = MathF.Min(rectangle.MaxU - rectangle.MinU, rectangle.MaxV - rectangle.MinV);
         if (shortestSide < 3) return false;
@@ -259,7 +272,7 @@ internal static class DbPostprocess
         if (!MathCompat.IsFinite(score) || score < options.BoxThreshold) return false;
         Point[] unclipped = Unclip(miniBoxScratch, options.UnclipRatio);
         if (unclipped.Length < 3) return false;
-        if (!TryMinimumRectangle(unclipped, unclipped.Length, hullScratch,
+        if (!TryMinimumRectangle(unclipped, unclipped.Length, ref hullScratch,
             out rectangle, expandedMiniBoxScratch)) return false;
         shortestSide = MathF.Min(rectangle.MaxU - rectangle.MinU, rectangle.MaxV - rectangle.MinV);
         if (shortestSide < 5) return false;
@@ -278,7 +291,7 @@ internal static class DbPostprocess
         // minAreaRect before perspective cropping. Recompute that rectangle
         // here so the pure-managed crop receives the same geometry.
         Point[] mappedPoints = corners.ToArray();
-        if (!TryMinimumRectangle(mappedPoints, mappedPoints.Length, hullScratch,
+        if (!TryMinimumRectangle(mappedPoints, mappedPoints.Length, ref hullScratch,
             out _, remappedCornersScratch)) return false;
         remappedCornersScratch.CopyTo(corners);
         if (Distance(corners[0], corners[1]) <= 4 || Distance(corners[0], corners[3]) <= 4)
@@ -475,10 +488,13 @@ internal static class DbPostprocess
         return area * 0.5;
     }
 
-    private static bool TryMinimumRectangle(Point[] points, int count, Point[] hullScratch,
+    private static bool TryMinimumRectangle(Point[] points, int count, ref Point[] hullScratch,
         out Rectangle rectangle, Span<Point> corners)
     {
-        rectangle = default; int hullCount = ConvexHull(points, count, hullScratch);
+        rectangle = default;
+        // Monotone chain writes at most 2*count entries.
+        if (hullScratch.Length < checked(count * 2)) hullScratch = new Point[Math.Max(count * 2, 1024)];
+        int hullCount = ConvexHull(points, count, hullScratch);
         if (hullCount < 3) return false;
         float bestArea = float.PositiveInfinity;
         for (int edge = 0; edge < hullCount; edge++)

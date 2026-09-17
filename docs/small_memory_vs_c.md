@@ -328,13 +328,36 @@ C 省 Δ WS，主要不是漏掉的实现细节，而是它愿意用 **重建 se
 
 改完至少在本机串行重跑 §2.2，并填：
 
-| 项 | 改前（§4.1） | 改后 |
+| 项 | 改前（§4.1） | 改后（§10，2026-09-17 同机同日 A/B） |
 | --- | --- | --- |
-| sharp 1w mean ms | 307.8 |  |
-| sharp 4w mean ms | 225.9 |  |
-| sharp exact_lines / CER | 940/1026 / 0.61% | 必须相同 |
-| sharp 1w Δ WS | +447.3 | 目标下降，且 1w 优先 |
-| sharp 4w Δ WS | +617.7 |  |
-| sharp 1w/4w peak vs last | 几乎相等 | 若只变成 peak>last 而 last 不降，多半是把 transient 提前 free 了，没有解决 ratchet |
+| sharp 1w mean ms | 307.8 | 300.9 / 309.0（同日 stash 基线 325.7 / 322.8，**−4~8%**） |
+| sharp 4w mean ms | 225.9 | 192.7 / 190.6（同日 stash 基线 207.9 / 210.8，**−7~10%**） |
+| sharp exact_lines / CER | 940/1026 / 0.61% | 940/1026 / 0.61%；100 行 texts+hash 逐行相同 |
+| sharp 1w Δ WS | +447.3 | **+142**（loaded 453.6 → last 595.3） |
+| sharp 4w Δ WS | +617.7 | **+216**（loaded 453.9 → last 670.1） |
+| sharp loaded | 476.8 | **453.6**（常量不再按 CompiledModel 复制一份） |
+| sharp 1w/4w peak vs last | 几乎相等 | peak 略高于 last（600.3 vs 595.3），workspace 换代时旧块立即归还 |
 
-文本输出（每行字和 `hash`）若动了 REC 宽度或 CTC 融合，必须和改前 JSON **逐行对比**，不能只看 CER。
+文本输出（每行字和 `hash`）若动了 REC 宽度或 CTC 融合，必须和改前 JSON **逐行对比**，不能只看 CER。本轮用 `bench-out/tools/cmp_texts.ps1 <new.json> <old.json>` 对 small 1w/4w、tiny 4w、medium 4w 各 100 行做了逐行比对，全部 0 差异。
+
+---
+
+## 10. 已实施（2026-09-17）
+
+不改 REC 宽度策略、不改 CTC 数值、不做 shrink/重建 session。所有改动只影响“活值放在哪”，不影响算什么。
+
+| 改动 | 文件 | 省的是什么 |
+| --- | --- | --- |
+| **融合幽灵张量不占槽**：Conv+Relu/HardSwish/BiasAdd/ResidualAdd/GELU/LayerNorm 等融合组里，只有 sink 真被写；中间张量（`PhantomSink`）绑定到 sink 窗口，不再单独分配 | `CompiledModel.MarkPhantoms`、`InferenceSession.PlanWorkspace` | 旧 planner 给每个融合中间量都留了整块（DET 960² 一个 Conv 输出就是 21 MB） |
+| **planner 改为离线区间贪心（greedy-by-size）**，替换按节点顺序的 first-fit | `InferenceSession.PlanWorkspace` | first-fit 比活值下界多 35–40%（DET 108 vs 79 MB） |
+| **别名组**：NCHW 通道 Concat 输入直接写进输出分片（`Concat` 跳过拷贝）；GELU/HardSwish 原地；独立 Add/Sub/Mul/Div 复用同形状、当节点死亡的操作数 | 同上 + `Concat` | DET stem 的 Concat 三份 → 一份；FPN 的 Add 少一份 |
+| **REC 只规划到 CTC 投影之前**（`PlanForCtcProjection`）：`TryArgMax` 路径根本不写 `[T×18710]` 的 logits/Add/Softmax 三张平面 | `InferenceSession.Reshape/EnsureFullPlan`、`PaddleOcrRecognizer.RentSession` | REC@1600 35 MB → 14 MB；若真走全图 `Run`，先透明补全规划 |
+| **workspace 改为非托管内存**（`NativeWorkspace`，64B 对齐，尾部 64 float 护栏） | `NativeWorkspace.cs`、`TensorValue` | grow-only 换代时旧 `float[]` 是 LOH 垃圾，dump 里 112–120 MB “Free” 常驻；`AlignedFree` 立即还给 OS，last 才能低于 peak |
+| **DB 后处理 contour/hull 按需增长**，不再预分配 `pixels` / `2×pixels` 个 Point | `DbPostprocess.Workspace.AddBoundary` | 22 MB Point[]；上限仍是 pixels，语义不变 |
+| **常量不再按 CompiledModel 复制成 float[]**，`TensorMeta.Constant` 直接引用 `Model` 的 byte[] | `Model.GetTensorArray`、`CompiledModel.TensorMeta`、`TensorValue` | 只影响 loaded：small −26 MB，medium −127 MB |
+
+Δ WS 现在的构成（small 1w，约 142 MB）：DET workspace ≈ 72 MB（960² 一次到位、grow-only）、REC ≈ 14 MB、CLS 很小；其余是 lazy packed weights（速度换的副本）、DB 位图、GC gen0 预算。DET 的 72 MB 已接近该图的活值下界（stem `Concat` 邻接 + FPN 三张 5 MB 平面），再降只能动 NHWC Concat 的分片写入（kernel 级改动）。
+
+其他模型同口径（texts 逐行相同）：tiny 4w Δ WS 383 → 114；medium 4w loaded 827 → 700、Δ WS 1169 → 514（medium DET stem 的 Concat 是 NHWC，无法别名，202 MB 即活值下界）。
+
+诊断手段（已留在代码里）：`PPOCR_DUMP_PLAN=1` 逐次 reshape 打印 bump / 活值下界 / 最大张量；harness 的 `PPOCR_BENCH_HOLD=1` 跑完后挂起等回车，方便 `dotnet-dump collect`；JSON `meta` 新增 `gc_*` 字段与 `working_set_mb_after_gc`。
