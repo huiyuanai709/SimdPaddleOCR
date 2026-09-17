@@ -845,7 +845,7 @@ internal static unsafe partial class Nhwc
         int workers = threads > 1 && work >= 2_000_000 ? Math.Min(threads, rowsTotal) : 1;
         // 4-row tiles (GemmTile4AdvSimd): the 6-row kernel spills accumulators
         // in its 4k-unrolled loop; 16 acc + 4 input + 4 weight vectors fit.
-        const int TileRows4 = TileRows, PartialFloats4 = PartialFloats;
+        const int TileRows4 = 4, PartialFloats4 = TileRows4 * OcBlock;
         int xTiles = (width + TileRows4 - 1) / TileRows4;
         fixed (float* inPtr = input, wPtr = packedWeights, bPtr = bias, outPtr = output)
         {
@@ -876,7 +876,7 @@ internal static unsafe partial class Nhwc
                             {
                                 int x0 = xTile * TileRows4;
                                 int rows = Math.Min(TileRows4, width - x0);
-                                GemmTileAdvSimd(inRow + (long)x0 * inputChannels, rows, inputChannels, w, 0, inputChannels,
+                                GemmTile4AdvSimd(inRow + (long)x0 * inputChannels, rows, inputChannels, w, 0, inputChannels,
                                     null, partial);
                                 StoreEpilogueAdvSimd(partial, rows,
                                     outRow + (long)(2 * x0) * outputChannels + ocBlock * OcBlock, 2 * outputChannels,

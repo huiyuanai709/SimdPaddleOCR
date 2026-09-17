@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.CompilerServices;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
@@ -362,6 +363,10 @@ internal static unsafe partial class Nhwc
                 }
         return packed;
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float ActivateScalar(float v, NhwcActivation activation)
+        => activation == NhwcActivation.Relu ? MathF.Max(v, 0f) : v;
 
     /// <summary>Copies the receptive field at (iy0, ix0) into a zero-padded patch of kernelH x patchWidth pixels.</summary>
     private static void GatherPatch(float* input, float* patch, int height, int width, int channels,

@@ -583,9 +583,5 @@ internal static unsafe partial class Nhwc
         return s.ToScalar();
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float ActivateScalar(float v, NhwcActivation activation)
-        => activation == NhwcActivation.Relu ? MathF.Max(v, 0f) : v;
-
     // ----------------------------------------------------------------- packing
 }
