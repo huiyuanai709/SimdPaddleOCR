@@ -79,10 +79,20 @@ jobs:
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run platform smoke
-        run: >
-          dotnet run --project test/Sdcb.SimdPaddleOCR.Tests -c Release -r ${{ matrix.rid }} --no-self-contained --
-          --smoke --count 20 --engine sharp --workers 4 --model tiny --input dataset
-          --case-id ${{ matrix.name }} --out ${{ matrix.name }}-smoke.json
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exeName = if ($IsWindows) { 'Sdcb.SimdPaddleOCR.Tests.exe' } else { 'Sdcb.SimdPaddleOCR.Tests' }
+
+          # build
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r '${{ matrix.rid }}' --no-self-contained -o artifacts/net10 --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
+          $exe = Join-Path artifacts/net10 $exeName
+          if (-not $IsWindows) { chmod +x -- $exe }
+
+          # run
+          & $exe --smoke --count 20 --engine sharp --workers 4 --model tiny --input dataset --case-id '${{ matrix.name }}' --out '${{ matrix.name }}-smoke.json'
+          if ($LASTEXITCODE -ne 0) { throw "smoke failed: $LASTEXITCODE" }
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -101,14 +111,21 @@ jobs:
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run tiny/small/medium smoke
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          for model in tiny small medium; do
-            dotnet run --project test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-x64 --no-self-contained -- \
-              --smoke --count 20 --engine sharp --workers 4 --model "$model" --input dataset \
-              --case-id "$model" --out "model-$model-smoke.json"
-          done
+          $ErrorActionPreference = 'Stop'
+
+          # build
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-x64 --no-self-contained -o artifacts/net10 --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
+          $exe = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
+          chmod +x -- $exe
+
+          # run
+          foreach ($model in @('tiny','small','medium')) {
+            & $exe --smoke --count 20 --engine sharp --workers 4 --model $model --input dataset --case-id $model --out "model-$model-smoke.json"
+            if ($LASTEXITCODE -ne 0) { throw "smoke $model failed: $LASTEXITCODE" }
+          }
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -145,6 +162,16 @@ jobs:
           $hostInfo = "machine=$env:COMPUTERNAME os=$([System.Environment]::OSVersion.VersionString) logicalCpu=$([System.Environment]::ProcessorCount) cpu=$cpu memory=$memoryGb GB memorySpeed=$memorySpeedText"
           Write-Output "Benchmark host: $hostInfo"
           Write-Output "::notice title=Benchmark host::$hostInfo"
+
+          # build
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r win-x64 --no-self-contained -o artifacts/net10 --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r win-x64 --no-self-contained -o artifacts/ns20 --nologo -p:UseNs20Library=true
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build ns20 failed: $LASTEXITCODE" }
+          $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.exe'
+          $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests.exe'
+
+          # run
           $base = 'win-x64-simd'
           $cases = @(
             @{ id='tiny-4w';          engine='sharp';    workers=4; model='tiny'; isa='' },
@@ -157,17 +184,26 @@ jobs:
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
-              Remove-Item Env:DOTNET_EnableAVX512,Env:DOTNET_EnableAVX2,Env:DOTNET_EnableAVX,Env:DOTNET_EnableHWIntrinsic -ErrorAction SilentlyContinue
-              if ($c.isa) {
-                foreach ($setting in $c.isa.Split(';')) { $parts = $setting.Split('='); Set-Item "Env:$($parts[0])" $parts[1] }
-              }
+              $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
-              # MSBuild reads this env var as a property. Passing -p/--property to
-              # `dotnet run` leaks a "-" into the app args on the CI SDK.
-              $env:UseNs20Library = if ($c.ns2) { 'true' } else { 'false' }
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine',$c.engine,'--workers',$c.workers,'--model',$c.model,'--input','dataset',
                 '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
-              dotnet run --project test/Sdcb.SimdPaddleOCR.Tests -c Release -r win-x64 --no-self-contained -- @appArgs
+              $saved = @{}
+              if ($c.isa) {
+                foreach ($setting in $c.isa.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+                  $eq = $setting.IndexOf('=')
+                  $k = $setting.Substring(0, $eq); $v = $setting.Substring($eq + 1)
+                  $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+                  [Environment]::SetEnvironmentVariable($k, $v, 'Process')
+                }
+              }
+              try {
+                & $exe @appArgs
+                if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
+              }
+              finally {
+                foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+              }
             }
             finally { Write-Output '::endgroup::' }
           }
@@ -206,6 +242,13 @@ jobs:
           $hostInfo = "machine=$env:COMPUTERNAME os=$([System.Environment]::OSVersion.VersionString) logicalCpu=$([System.Environment]::ProcessorCount) cpu=$cpu memory=$memoryGb GB memorySpeed=$memorySpeedText"
           Write-Output "Benchmark host: $hostInfo"
           Write-Output "::notice title=Benchmark host::$hostInfo"
+
+          # build
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r win-x64 --no-self-contained -o artifacts/net10 --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
+          $exe = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.exe'
+
+          # run
           $base = 'win-x64-engines'
           $cases = @(
             @{ id='tiny-1w';      engine='sharp';    workers=1; model='tiny' },
@@ -217,9 +260,8 @@ jobs:
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
-              $appArgs = @('--benchmark','--benchmark-kind','engine','--engine',$c.engine,'--workers',$c.workers,'--model',$c.model,'--input','dataset',
-                '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
-              dotnet run --project test/Sdcb.SimdPaddleOCR.Tests -c Release -r win-x64 --no-self-contained -- @appArgs
+              & $exe --benchmark --benchmark-kind engine --engine $c.engine --workers $c.workers --model $c.model --input dataset --case-id $c.id --replica '${{ matrix.replica }}' --out $out
+              if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
             }
             finally { Write-Output '::endgroup::' }
           }
@@ -267,6 +309,18 @@ jobs:
           $hostInfo = "machine=$env:HOSTNAME os=$([System.Environment]::OSVersion.VersionString) logicalCpu=$([System.Environment]::ProcessorCount) cpu=$($cpu.Trim()) memory=$memoryGb GB memorySpeed=$memorySpeed"
           Write-Output "Benchmark host: $hostInfo"
           Write-Output "::notice title=Benchmark host::$hostInfo"
+
+          # build
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-arm64 --no-self-contained -o artifacts/net10 --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-arm64 --no-self-contained -o artifacts/ns20 --nologo -p:UseNs20Library=true
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build ns20 failed: $LASTEXITCODE" }
+          $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
+          $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests'
+          chmod +x -- $exeNet10
+          chmod +x -- $exeNs20
+
+          # run
           $base = 'linux-arm64'
           $cases = @(
             @{ id='tiny-1w';         workers=1; model='tiny'; isa='' },
@@ -279,20 +333,26 @@ jobs:
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
-              Remove-Item Env:DOTNET_EnableHWIntrinsic -ErrorAction SilentlyContinue
-              if ($c.isa) {
-                foreach ($setting in $c.isa.Split(';')) {
-                  $parts = $setting.Split('=')
-                  Set-Item "Env:$($parts[0])" $parts[1]
-                }
-              }
+              $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
-              # MSBuild reads this env var as a property. Passing -p/--property to
-              # `dotnet run` leaks a "-" into the app args on the CI SDK.
-              $env:UseNs20Library = if ($c.ns2) { 'true' } else { 'false' }
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine','sharp','--workers',$c.workers,'--model',$c.model,'--input','dataset',
                 '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
-              dotnet run --project test/Sdcb.SimdPaddleOCR.Tests -c Release -r linux-arm64 --no-self-contained -- @appArgs
+              $saved = @{}
+              if ($c.isa) {
+                foreach ($setting in $c.isa.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+                  $eq = $setting.IndexOf('=')
+                  $k = $setting.Substring(0, $eq); $v = $setting.Substring($eq + 1)
+                  $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+                  [Environment]::SetEnvironmentVariable($k, $v, 'Process')
+                }
+              }
+              try {
+                & $exe @appArgs
+                if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
+              }
+              finally {
+                foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+              }
             }
             finally { Write-Output '::endgroup::' }
           }
@@ -339,6 +399,18 @@ jobs:
           $hostInfo = "machine=$env:HOSTNAME os=$([System.Environment]::OSVersion.VersionString) logicalCpu=$([System.Environment]::ProcessorCount) cpu=$cpu memory=$memoryGb GB memorySpeed=$memorySpeed"
           Write-Output "Benchmark host: $hostInfo"
           Write-Output "::notice title=Benchmark host::$hostInfo"
+
+          # build
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r osx-arm64 --no-self-contained -o artifacts/net10 --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r osx-arm64 --no-self-contained -o artifacts/ns20 --nologo -p:UseNs20Library=true
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build ns20 failed: $LASTEXITCODE" }
+          $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests'
+          $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests'
+          chmod +x -- $exeNet10
+          chmod +x -- $exeNs20
+
+          # run
           $base = 'osx-arm64'
           $cases = @(
             @{ id='tiny-1w';         workers=1; model='tiny'; isa='' },
@@ -349,20 +421,26 @@ jobs:
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
             try {
-              Remove-Item Env:DOTNET_EnableHWIntrinsic -ErrorAction SilentlyContinue
-              if ($c.isa) {
-                foreach ($setting in $c.isa.Split(';')) {
-                  $parts = $setting.Split('=')
-                  Set-Item "Env:$($parts[0])" $parts[1]
-                }
-              }
+              $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
-              # MSBuild reads this env var as a property. Passing -p/--property to
-              # `dotnet run` leaks a "-" into the app args on the CI SDK.
-              $env:UseNs20Library = if ($c.ns2) { 'true' } else { 'false' }
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine','sharp','--workers',$c.workers,'--model',$c.model,'--input','dataset',
                 '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
-              dotnet run --project test/Sdcb.SimdPaddleOCR.Tests -c Release -r osx-arm64 --no-self-contained -- @appArgs
+              $saved = @{}
+              if ($c.isa) {
+                foreach ($setting in $c.isa.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+                  $eq = $setting.IndexOf('=')
+                  $k = $setting.Substring(0, $eq); $v = $setting.Substring($eq + 1)
+                  $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+                  [Environment]::SetEnvironmentVariable($k, $v, 'Process')
+                }
+              }
+              try {
+                & $exe @appArgs
+                if ($LASTEXITCODE -ne 0) { throw "bench failed: $LASTEXITCODE" }
+              }
+              finally {
+                foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+              }
             }
             finally { Write-Output '::endgroup::' }
           }
