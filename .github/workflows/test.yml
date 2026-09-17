@@ -21,9 +21,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: "10.0.x"
       - name: Unit tests (net10 library)
         run: dotnet test test/Sdcb.SimdPaddleOCR.UnitTests -c Release --nologo
       - name: Unit tests (ns2.0 library)
@@ -39,10 +36,6 @@ jobs:
         with:
           path: dataset
           key: ocr-dataset-${{ hashFiles('test/Sdcb.SimdPaddleOCR.TestData/**/*.cs', 'test/Sdcb.SimdPaddleOCR.TestData/**/*.csproj') }}
-      - uses: actions/setup-dotnet@v6
-        if: steps.dataset.outputs.cache-hit != 'true'
-        with:
-          dotnet-version: "10.0.x"
       - name: Generate dataset
         if: steps.dataset.outputs.cache-hit != 'true'
         run: dotnet run --project test/Sdcb.SimdPaddleOCR.TestData -c Release -- --out dataset
@@ -69,13 +62,6 @@ jobs:
           - { name: osx-arm64,   os: macos-26,         rid: osx-arm64 }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        if: matrix.rid != 'win-x86'
-        with:
-          dotnet-version: "10.0.x"
-      - uses: actions/setup-dotnet@v6
-        if: matrix.rid == 'win-x86'
-        with: { dotnet-version: "10.0.x", architecture: x86 }
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run platform smoke
@@ -106,8 +92,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        with: { dotnet-version: "10.0.x" }
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run tiny/small/medium smoke
@@ -144,8 +128,6 @@ jobs:
       matrix: { replica: [1, 2, 3, 4, 5, 6] }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        with: { dotnet-version: "10.0.x" }
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run Windows x64 benchmark suite
@@ -225,8 +207,6 @@ jobs:
       matrix: { replica: [1, 2, 3, 4, 5, 6] }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        with: { dotnet-version: "10.0.x" }
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run Windows x64 engine comparison
@@ -283,8 +263,6 @@ jobs:
       matrix: { replica: [1, 2, 3, 4, 5, 6] }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        with: { dotnet-version: "10.0.x" }
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run ARM64 benchmark suite
@@ -373,8 +351,6 @@ jobs:
       matrix: { replica: [1, 2, 3] }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        with: { dotnet-version: "10.0.x" }
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run macOS ARM64 worker benchmark
@@ -459,8 +435,6 @@ jobs:
     permissions: { actions: write, contents: read }
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
-        with: { dotnet-version: "10.0.x" }
       - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
