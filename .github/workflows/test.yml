@@ -119,6 +119,54 @@ jobs:
           path: model-*-smoke.json
           if-no-files-found: warn
 
+  smoke-win-x64-isa:
+    needs: generate
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: ocr-dataset, path: dataset }
+      - name: Run Windows x64 ISA smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet build test/Sdcb.SimdPaddleOCR.Tests -c Release -r win-x64 --no-self-contained -o artifacts/net10 --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed: $LASTEXITCODE" }
+          $exe = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.exe'
+          $cases = @(
+            @{ id='tiny-4w-noavx2'; isa='DOTNET_EnableAVX512=0;DOTNET_EnableAVX2=0' },
+            @{ id='tiny-4w-noavx';  isa='DOTNET_EnableAVX512=0;DOTNET_EnableAVX2=0;DOTNET_EnableAVX=0' },
+            @{ id='tiny-4w-scalar'; isa='DOTNET_EnableHWIntrinsic=0' }
+          )
+          foreach ($c in $cases) {
+            Write-Output "::group::isa smoke $($c.id)"
+            try {
+              $saved = @{}
+              foreach ($setting in $c.isa.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+                $eq = $setting.IndexOf('=')
+                $k = $setting.Substring(0, $eq); $v = $setting.Substring($eq + 1)
+                $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+                [Environment]::SetEnvironmentVariable($k, $v, 'Process')
+              }
+              try {
+                & $exe --smoke --count 20 --warmup 1 --engine sharp --workers 4 --model tiny --input dataset --case-id $c.id --out "isa-$($c.id)-smoke.json"
+                if ($LASTEXITCODE -ne 0) { throw "isa smoke $($c.id) failed: $LASTEXITCODE" }
+              }
+              finally {
+                foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+              }
+            }
+            finally { Write-Output '::endgroup::' }
+          }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-win-x64-isa
+          path: isa-*-smoke.json
+          if-no-files-found: warn
+
   bench-win-x64-simd:
     needs: generate
     runs-on: windows-2025
@@ -155,15 +203,20 @@ jobs:
           $exeNet10 = 'artifacts/net10/Sdcb.SimdPaddleOCR.Tests.exe'
           $exeNs20 = 'artifacts/ns20/Sdcb.SimdPaddleOCR.Tests.exe'
 
-          # run
+          # Cold GHA VMs bias the first process by ~25%. Heat the machine
+          # with a discarded default tiny-4w; later cases use --warmup 1.
+          Write-Output "::group::vm warmup tiny-4w x25 (not uploaded)"
+          try {
+            & $exeNet10 --benchmark --benchmark-kind simd --engine sharp --workers 4 --model tiny --input dataset --count 25 --warmup 0 --case-id vm-warmup --replica '${{ matrix.replica }}' --out vm-warmup.json
+            if ($LASTEXITCODE -ne 0) { throw "vm warmup failed: $LASTEXITCODE" }
+          }
+          finally { Write-Output '::endgroup::' }
+
           $base = 'win-x64-simd'
           $cases = @(
-            @{ id='tiny-4w-noavx512'; engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0' },
             @{ id='tiny-4w';          engine='sharp';    workers=4; model='tiny'; isa='' },
-            @{ id='tiny-4w-ns2';      engine='sharp';    workers=4; model='tiny'; isa=''; ns2=$true },
-            @{ id='tiny-4w-noavx2';   engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0;DOTNET_EnableAVX2=0' },
-            @{ id='tiny-4w-noavx';    engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0;DOTNET_EnableAVX2=0;DOTNET_EnableAVX=0' },
-            @{ id='tiny-4w-scalar';   engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableHWIntrinsic=0' }
+            @{ id='tiny-4w-noavx512'; engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0' },
+            @{ id='tiny-4w-ns2';      engine='sharp';    workers=4; model='tiny'; isa=''; ns2=$true }
           )
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
@@ -171,7 +224,7 @@ jobs:
               $exe = if ($c.ns2) { $exeNs20 } else { $exeNet10 }
               $out = "$base-$($c.id)-r${{ matrix.replica }}.json"
               $appArgs = @('--benchmark','--benchmark-kind','simd','--engine',$c.engine,'--workers',$c.workers,'--model',$c.model,'--input','dataset',
-                '--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
+                '--warmup','1','--case-id',$c.id,'--replica','${{ matrix.replica }}','--out',$out)
               $saved = @{}
               if ($c.isa) {
                 foreach ($setting in $c.isa.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)) {
@@ -431,7 +484,7 @@ jobs:
           if-no-files-found: warn
 
   report:
-    needs: [smoke-platform, smoke-models, bench-win-x64-simd, bench-win-x64-engines, bench-linux-arm64, bench-osx-arm64]
+    needs: [smoke-platform, smoke-models, smoke-win-x64-isa, bench-win-x64-simd, bench-win-x64-engines, bench-linux-arm64, bench-osx-arm64]
     if: always() && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 15

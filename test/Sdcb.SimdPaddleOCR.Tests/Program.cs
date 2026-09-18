@@ -16,7 +16,7 @@ using ImageSharpImage = SixLabors.ImageSharp.Image;
 
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
-    Console.WriteLine("usage: --workers 1..16 --model tiny|small|medium --input <dataset> --out <json> [--engine sharp|c] [--smoke|--benchmark] [--benchmark-kind simd|engine] [--count N] [--case-id ID] [--replica N] [--c-assets <dir>]");
+    Console.WriteLine("usage: --workers 1..16 --model tiny|small|medium --input <dataset> --out <json> [--engine sharp|c] [--smoke|--benchmark] [--benchmark-kind simd|engine] [--count N] [--warmup N] [--case-id ID] [--replica N] [--c-assets <dir>]");
     Console.WriteLine("       --summarize <file...> [--input <dataset>] [--out-md <path>]");
     return args.Length == 0 ? 2 : 0;
 }
@@ -32,6 +32,7 @@ string engineName = "sharp";
 bool benchmark = true;
 string benchmarkKind = "simd";
 int? count = null;
+int warmupImages = 1;
 string caseId = "";
 int replica = 1;
 string? inputDir = null;
@@ -49,6 +50,7 @@ for (int i = 0; i < args.Length; i++)
         case "--benchmark": benchmark = true; break;
         case "--benchmark-kind": benchmarkKind = Next().ToLowerInvariant(); break;
         case "--count": count = int.Parse(Next()); break;
+        case "--warmup": warmupImages = int.Parse(Next()); break;
         case "--case-id": caseId = Next(); break;
         case "--replica": replica = int.Parse(Next()); break;
         case "--input": inputDir = Next(); break;
@@ -68,6 +70,8 @@ if (benchmarkKind is not ("simd" or "engine"))
     throw new ArgumentException("--benchmark-kind must be simd or engine");
 if (count is < 1 or > 100)
     throw new ArgumentException("--count must be 1..100");
+if (warmupImages < 0)
+    throw new ArgumentException("--warmup must be >= 0");
 if (replica < 1)
     throw new ArgumentException("--replica must be >= 1");
 if (inputDir is null || outPath is null)
@@ -116,9 +120,9 @@ long allocatedAtLoad = GC.GetTotalAllocatedBytes(precise: true);
 double wsPeak = wsLoaded;
 Console.WriteLine(engine.LoadedMessage(wsLoaded));
 
-// First images heat JIT / CPU P-states. Timing summaries drop them;
-// accuracy and ΔWS (loaded → last image) still cover the full set.
-const int warmupImages = 10;
+// Timing summaries drop the first --warmup images (process JIT). Accuracy
+// and ΔWS (loaded → last image) still cover the full set. A discarded
+// VM heater in CI is separate: each case is a new process.
 int warmupCount = Math.Min(warmupImages, Math.Max(0, decoded.Length - 1));
 List<BenchmarkRow> rows = [];
 for (int index = 0; index < decoded.Length; index++)
