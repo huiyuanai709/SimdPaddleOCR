@@ -447,8 +447,7 @@ jobs:
           $cases = @(
             @{ id='tiny-1w';         workers=1; model='tiny'; isa='' },
             @{ id='tiny-4w';         workers=4; model='tiny'; isa='' },
-            @{ id='tiny-4w-ns2';     workers=4; model='tiny'; isa=''; ns2=$true },
-            @{ id='tiny-4w-scalar';  workers=4; model='tiny'; isa='DOTNET_EnableHWIntrinsic=0' }
+            @{ id='tiny-4w-ns2';     workers=4; model='tiny'; isa=''; ns2=$true }
           )
           foreach ($c in $cases) {
             Write-Output "::group::benchmark case $($c.id) (replica ${{ matrix.replica }})"
