@@ -158,9 +158,9 @@ jobs:
           # run
           $base = 'win-x64-simd'
           $cases = @(
+            @{ id='tiny-4w-noavx512'; engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0' },
             @{ id='tiny-4w';          engine='sharp';    workers=4; model='tiny'; isa='' },
             @{ id='tiny-4w-ns2';      engine='sharp';    workers=4; model='tiny'; isa=''; ns2=$true },
-            @{ id='tiny-4w-noavx512'; engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0' },
             @{ id='tiny-4w-noavx2';   engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0;DOTNET_EnableAVX2=0' },
             @{ id='tiny-4w-noavx';    engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableAVX512=0;DOTNET_EnableAVX2=0;DOTNET_EnableAVX=0' },
             @{ id='tiny-4w-scalar';   engine='sharp';    workers=4; model='tiny'; isa='DOTNET_EnableHWIntrinsic=0' }
