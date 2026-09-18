@@ -118,7 +118,7 @@ Console.WriteLine(engine.LoadedMessage(wsLoaded));
 
 // First images heat JIT / CPU P-states. Timing summaries drop them;
 // accuracy and ΔWS (loaded → last image) still cover the full set.
-const int warmupImages = 5;
+const int warmupImages = 10;
 int warmupCount = Math.Min(warmupImages, Math.Max(0, decoded.Length - 1));
 List<BenchmarkRow> rows = [];
 for (int index = 0; index < decoded.Length; index++)
