@@ -10,13 +10,10 @@ internal static class PPOCRPreprocess
 {
     private static readonly double[] DetMean = [0.485, 0.456, 0.406];
     private static readonly double[] DetInverseStd = [1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225];
-    private static readonly double[] ClsMean = [0.485, 0.456, 0.406];
-    private static readonly double[] ClsInverseStd = [1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225];
     // Normalization is applied to millions of pixels per request.  Looking up
     // the exact float result for each 8-bit value removes a floating-point
     // divide/multiply from the hot loops while retaining the same rounding.
     private static readonly float[] DetNormalized = BuildChannelLut(DetMean, DetInverseStd);
-    private static readonly float[] ClsNormalized = BuildChannelLut(ClsMean, ClsInverseStd);
     private static readonly float[] RecNormalized = BuildRecLut();
 
     private static float[] BuildChannelLut(double[] mean, double[] inverseStd)
@@ -272,102 +269,33 @@ internal static class PPOCRPreprocess
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    public static unsafe int Cls(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+    public static int Cls(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, Span<float> output, ImagePixelFormat format = ImagePixelFormat.Bgr24) =>
         Cls(source, sourceWidth, sourceHeight, sourceStride, output, null, format: format);
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    internal static unsafe int Cls(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+    internal static int Cls(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride, Span<float> output, ResizeWorkspace? workspace, bool nhwc = false,
         ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         const int height = 80, width = 160;
-        int plane = height * width;
-        if (output.Length != 3 * plane) throw new ArgumentException("Invalid CLS output size.");
-        // PP-LCNet_x0_25_textline_ori uses the PaddleX classification pipeline:
-        // ReadImage(format="RGB") then ResizeImage([160, 80]) then ImageNet
-        // NormalizeImage. Resize in the 8-bit BGR domain first (cv2 INTER_LINEAR
-        // coefficients), then write RGB NCHW planes with per-channel LUTs.
-        // Bilinear is per-channel, so swapping after resize matches BGR2RGB
-        // before resize.
-        ResizeBgrInterLinearToClsNchw(source, sourceWidth, sourceHeight, sourceStride,
-            width, height, output, workspace, nhwc, format);
-        return width;
-    }
-
-    [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    private static unsafe void ResizeBgrInterLinearToClsNchw(ReadOnlySpan<byte> source,
-        int sourceWidth, int sourceHeight, int sourceStride, int resizedWidth,
-        int resizedHeight, Span<float> output, ResizeWorkspace? workspace, bool nhwc,
-        ImagePixelFormat format)
-    {
-        bool pooled = workspace is null;
-        workspace?.Ensure(resizedWidth);
-        int[] xOffsets = workspace?.XOffsets ?? PooledArrays.Rent<int>(resizedWidth);
-        short[] xCoefficients = workspace?.XCoefficients ?? PooledArrays.Rent<short>(checked(resizedWidth * 2));
-        int[] row0 = workspace?.Row0 ?? PooledArrays.Rent<int>(checked(resizedWidth * 3));
-        int[] row1 = workspace?.Row1 ?? PooledArrays.Rent<int>(checked(resizedWidth * 3));
-        int plane = checked(resizedHeight * resizedWidth);
-        try
-        {
-            BuildLinearCoefficients(sourceWidth, resizedWidth, xOffsets, xCoefficients);
-            fixed (byte* sourcePtr = source)
-            fixed (float* outputPtr = output)
-            fixed (float* normalizedPtr = ClsNormalized)
-            {
-                for (int oy = 0; oy < resizedHeight; oy++)
-                {
-                    GetLinearCoordinate(oy, sourceHeight, resizedHeight,
-                        out int sy, out short beta0, out short beta1);
-                    int sy0 = MathCompat.Clamp(sy, 0, sourceHeight - 1);
-                    int sy1 = MathCompat.Clamp(sy + 1, 0, sourceHeight - 1);
-                    BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy0,
-                        resizedWidth, xOffsets, xCoefficients, row0, format);
-                    BuildHorizontalRow(sourcePtr, sourceStride, sourceWidth, sy1,
-                        resizedWidth, xOffsets, xCoefficients, row1, format);
-                    int destination = oy * resizedWidth;
-                    for (int ox = 0; ox < resizedWidth; ox++)
-                    {
-                        int rowOffset = ox * 3;
-                        // Packed source is BGR; PaddleX ReadImage converts to RGB
-                        // before ImageNet, so NCHW planes are R, G, B.
-                        int h0 = row0[rowOffset + 2], h1 = row1[rowOffset + 2];
-                        int r = (((h0 >> 4) * beta0 >> 16) + ((h1 >> 4) * beta1 >> 16) + 2) >> 2;
-                        h0 = row0[rowOffset + 1]; h1 = row1[rowOffset + 1];
-                        int g = (((h0 >> 4) * beta0 >> 16) + ((h1 >> 4) * beta1 >> 16) + 2) >> 2;
-                        h0 = row0[rowOffset]; h1 = row1[rowOffset];
-                        int b = (((h0 >> 4) * beta0 >> 16) + ((h1 >> 4) * beta1 >> 16) + 2) >> 2;
-                        int rValue = MathCompat.Clamp(r, 0, 255);
-                        int gValue = MathCompat.Clamp(g, 0, 255);
-                        int bValue = MathCompat.Clamp(b, 0, 255);
-                        if (nhwc)
-                        {
-                            int pixel = (destination + ox) * 3;
-                            outputPtr[pixel] = normalizedPtr[rValue];
-                            outputPtr[pixel + 1] = normalizedPtr[256 + gValue];
-                            outputPtr[pixel + 2] = normalizedPtr[512 + bValue];
-                        }
-                        else
-                        {
-                            outputPtr[destination + ox] = normalizedPtr[rValue];
-                            outputPtr[plane + destination + ox] = normalizedPtr[256 + gValue];
-                            outputPtr[2 * plane + destination + ox] = normalizedPtr[512 + bValue];
-                        }
-                    }
-                }
-            }
-        }
-        finally
-        {
-            if (pooled)
-            {
-                PooledArrays.Return(xOffsets);
-                PooledArrays.Return(xCoefficients);
-                PooledArrays.Return(row0);
-                PooledArrays.Return(row1);
-            }
-        }
+        if (output.Length != 3 * height * width) throw new ArgumentException("Invalid CLS output size.");
+        // PP-LCNet_x0_25_textline_ori is a PaddleX classifier: the model card
+        // pipeline is ResizeImage([160, 80]) (stretch) then ImageNet on RGB,
+        // which is what we would match if we followed PaddleX literally.
+        // Stretching a thin Latin crop into 160×80 flips 0/180 in practice.
+        // The older PaddleOCR ClsResizeImg form — keep aspect (height 80,
+        // width min(160, ceil(80*w/h))), pad unused columns with -1, BGR,
+        // (x/255-0.5)/0.5 — does not. Why the PaddleX stretch loses here is
+        // unclear. Same OpenCV INTER_LINEAR + RecNormalized write as REC, so
+        // RGB/RGBA/padded stride stay bit-identical to BGR.
+        int actualWidth = (int)Math.Min(width,
+            ((long)height * sourceWidth + sourceHeight - 1L) / sourceHeight);
+        output.Fill(-1f);
+        ResizeBgrInterLinearToNchw(source, sourceWidth, sourceHeight, sourceStride,
+            actualWidth, height, width, output, workspace, nhwc, format);
+        return actualWidth;
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
