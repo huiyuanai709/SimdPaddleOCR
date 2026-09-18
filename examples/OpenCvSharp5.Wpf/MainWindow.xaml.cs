@@ -10,10 +10,6 @@ using Microsoft.Win32;
 using OpenCvSharp;
 using Sdcb.SimdPaddleOCR;
 using DrawingBitmap = System.Drawing.Bitmap;
-using DrawingBrush = System.Drawing.Brush;
-using DrawingColor = System.Drawing.Color;
-using DrawingGraphics = System.Drawing.Graphics;
-using DrawingPen = System.Drawing.Pen;
 
 namespace OpenCvSharp5.Wpf;
 
@@ -21,6 +17,8 @@ public partial class MainWindow : System.Windows.Window
 {
     private PaddleOcrAll? _ocr;
     private string _imagePath;
+    private BitmapSource? _sourcePreview;
+    private BitmapSource? _overlayPreview;
 
     public MainWindow() : this(Path.Combine("examples", "sample.jpg"))
     {
@@ -68,6 +66,8 @@ public partial class MainWindow : System.Windows.Window
     }
 
     private async void RunOcr_Click(object sender, RoutedEventArgs e) => await RunOcrAsync();
+
+    private void ShowOriginal_Changed(object sender, RoutedEventArgs e) => RefreshPreview();
 
     private void Output_TextChanged(object sender, TextChangedEventArgs e) =>
         OutputPlaceholder.Visibility = string.IsNullOrWhiteSpace(Output.Text)
@@ -120,7 +120,7 @@ public partial class MainWindow : System.Windows.Window
             using Mat image = Cv2.ImRead(_imagePath, ImreadModes.Color);
             if (image.Empty())
                 throw new InvalidDataException($"无法读取图片：{_imagePath}");
-            Preview.Source = ToBitmapSource(image);
+            ReplacePreviews(ToBitmapSource(image), overlay: null);
             Status.Text = $"图片：{_imagePath}    配置：{BuildConfiguration}";
         }
         catch (Exception ex)
@@ -144,12 +144,20 @@ public partial class MainWindow : System.Windows.Window
         {
             OcrRunResult run = await Task.Run(() => RunPipeline(path, ocr));
             total.Stop();
-            Preview.Source = ToBitmapSource(run.Annotated);
-            Output.Text = string.Join(Environment.NewLine, run.Result.Lines.Select(line => line.Text));
-            Status.Text =
-                $"完成：{run.Result.DetectedCount} 行，总耗时 {total.Elapsed.TotalMilliseconds:F1} ms。" +
-                $"当前为 {BuildConfiguration}，可再次点击“运行 OCR”。";
-            run.Annotated.Dispose();
+            try
+            {
+                ShowOriginalCheck.IsChecked = false;
+                ReplacePreviews(ToBitmapSource(run.Source), ToBitmapSource(run.Overlay));
+                Output.Text = string.Join(Environment.NewLine, run.Result.Lines.Select(line => line.Text));
+                Status.Text =
+                    $"完成：{run.Result.DetectedCount} 行，总耗时 {total.Elapsed.TotalMilliseconds:F1} ms。" +
+                    $"当前为 {BuildConfiguration}，可再次点击“运行 OCR”。";
+            }
+            finally
+            {
+                run.Source.Dispose();
+                run.Overlay.Dispose();
+            }
         }
         catch (Exception ex)
         {
@@ -177,7 +185,24 @@ public partial class MainWindow : System.Windows.Window
             image.Height,
             stride,
             ImagePixelFormat.Bgr24);
-        return new OcrRunResult(result, Annotate(image, result));
+        DrawingBitmap source = MatToBitmap(image);
+        DrawingBitmap overlay = OcrOverlay.Draw(source, result.Lines);
+        return new OcrRunResult(result, source, overlay);
+    }
+
+    private void ReplacePreviews(BitmapSource source, BitmapSource? overlay)
+    {
+        _sourcePreview = source;
+        _overlayPreview = overlay;
+        RefreshPreview();
+    }
+
+    private void RefreshPreview()
+    {
+        if (ShowOriginalCheck.IsChecked == true || _overlayPreview is null)
+            Preview.Source = _sourcePreview;
+        else
+            Preview.Source = _overlayPreview;
     }
 
     private static BitmapSource ToBitmapSource(Mat image)
@@ -205,29 +230,12 @@ public partial class MainWindow : System.Windows.Window
         return bitmap;
     }
 
-    private static DrawingBitmap Annotate(Mat image, PaddleOcrResult result)
+    private static DrawingBitmap MatToBitmap(Mat image)
     {
         Cv2.ImEncode(".png", image, out byte[] png);
         using MemoryStream stream = new(png, writable: false);
         using System.Drawing.Image source = System.Drawing.Image.FromStream(stream);
-        DrawingBitmap bitmap = new(source);
-        using DrawingGraphics graphics = DrawingGraphics.FromImage(bitmap);
-        using DrawingPen pen = new(DrawingColor.LimeGreen, 3);
-        using DrawingBrush brush = new System.Drawing.SolidBrush(DrawingColor.Red);
-        foreach (PaddleOcrLine line in result.Lines)
-        {
-            System.Drawing.PointF[] points =
-            [
-                new(line.Box.X1, line.Box.Y1),
-                new(line.Box.X2, line.Box.Y2),
-                new(line.Box.X3, line.Box.Y3),
-                new(line.Box.X4, line.Box.Y4)
-            ];
-            graphics.DrawPolygon(pen, points);
-            graphics.DrawString(line.Text, System.Drawing.SystemFonts.DefaultFont, brush, points[0]);
-        }
-
-        return bitmap;
+        return new DrawingBitmap(source);
     }
 
     private static string BuildConfiguration
@@ -242,5 +250,5 @@ public partial class MainWindow : System.Windows.Window
         }
     }
 
-    private sealed record OcrRunResult(PaddleOcrResult Result, DrawingBitmap Annotated);
+    private sealed record OcrRunResult(PaddleOcrResult Result, DrawingBitmap Source, DrawingBitmap Overlay);
 }

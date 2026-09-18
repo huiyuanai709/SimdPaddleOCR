@@ -13,7 +13,9 @@ partial class MainForm
         {
             components?.Dispose();
             _ocr?.Dispose();
-            _bitmap?.Dispose();
+            preview.Image = null;
+            _sourceBitmap?.Dispose();
+            _overlayBitmap?.Dispose();
         }
 
         base.Dispose(disposing);
@@ -34,6 +36,8 @@ partial class MainForm
         statusBar = new StatusStrip();
         status = new ToolStripStatusLabel();
         run = new Button();
+        showOriginal = new CheckBox();
+        runHost = new FlowLayoutPanel();
         paths = new TableLayoutPanel();
         imageLabel = new Label();
         detLabel = new Label();
@@ -143,13 +147,27 @@ partial class MainForm
         browseDict.UseVisualStyleBackColor = true;
         browseDict.Click += BrowseDict_Click;
 
+        showOriginal.Anchor = AnchorStyles.Left;
+        showOriginal.AutoSize = true;
+        showOriginal.Margin = new Padding(8, 6, 0, 6);
+        showOriginal.Text = "显示原图";
+        showOriginal.CheckedChanged += ShowOriginal_CheckedChanged;
+
         run.AutoSize = true;
-        run.Dock = DockStyle.Fill;
         run.Enabled = false;
         run.Margin = new Padding(8, 2, 0, 2);
         run.Text = "运行 OCR";
         run.UseVisualStyleBackColor = true;
         run.Click += Run_Click;
+
+        runHost.AutoSize = true;
+        runHost.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        runHost.Dock = DockStyle.Fill;
+        runHost.FlowDirection = FlowDirection.LeftToRight;
+        runHost.Margin = new Padding(0);
+        runHost.WrapContents = false;
+        runHost.Controls.Add(showOriginal);
+        runHost.Controls.Add(run);
 
         paths.AutoSize = true;
         paths.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -161,7 +179,7 @@ partial class MainForm
         paths.Controls.Add(imageLabel, 0, 0);
         paths.Controls.Add(imagePath, 1, 0);
         paths.Controls.Add(browseImage, 2, 0);
-        paths.Controls.Add(run, 3, 0);
+        paths.Controls.Add(runHost, 3, 0);
         paths.Controls.Add(detLabel, 0, 1);
         paths.Controls.Add(detPath, 1, 1);
         paths.Controls.Add(browseDet, 2, 1);
@@ -286,6 +304,8 @@ partial class MainForm
     private StatusStrip statusBar;
     private ToolStripStatusLabel status;
     private Button run;
+    private CheckBox showOriginal;
+    private FlowLayoutPanel runHost;
     private TableLayoutPanel paths;
     private Label imageLabel;
     private Label detLabel;

@@ -13,7 +13,8 @@ namespace SystemDrawing.WinForms;
 
 public partial class MainForm : Form
 {
-    private Bitmap? _bitmap;
+    private Bitmap? _sourceBitmap;
+    private Bitmap? _overlayBitmap;
     private PaddleOcrAll? _ocr;
 
     public MainForm()
@@ -59,6 +60,8 @@ public partial class MainForm : Form
         SelectFile(dictPath, "字典|*.txt|所有文件|*.*", image: false);
 
     private async void Run_Click(object? sender, EventArgs e) => await RunOcrAsync();
+
+    private void ShowOriginal_CheckedChanged(object? sender, EventArgs e) => RefreshPreview();
 
     private void Result_TextChanged(object? sender, EventArgs e) =>
         resultPlaceholder.Visible = string.IsNullOrWhiteSpace(result.Text);
@@ -117,7 +120,7 @@ public partial class MainForm : Form
         try
         {
             using Bitmap loaded = new(imagePath.Text);
-            SetBitmap(new Bitmap(loaded));
+            ReplaceImages(new Bitmap(loaded), overlay: null);
             status.Text = $"图片：{imagePath.Text}    配置：{BuildConfiguration}";
         }
         catch (Exception ex)
@@ -128,7 +131,7 @@ public partial class MainForm : Form
 
     private async Task RunOcrAsync()
     {
-        if (_ocr is null || _bitmap is null)
+        if (_ocr is null || _sourceBitmap is null)
             return;
 
         run.Enabled = false;
@@ -140,7 +143,8 @@ public partial class MainForm : Form
             OcrResult ocrResult = await Task.Run(() => RunPipeline(path));
             stopwatch.Stop();
             result.Text = ocrResult.Text;
-            SetBitmap(ocrResult.Annotated);
+            showOriginal.Checked = false;
+            ReplaceImages(ocrResult.Source, ocrResult.Overlay);
             status.Text =
                 $"完成：{ocrResult.Count} 行，总耗时 {stopwatch.Elapsed.TotalMilliseconds:F1} ms。" +
                 $"当前为 {BuildConfiguration}，可再次点击“运行 OCR”。";
@@ -158,37 +162,44 @@ public partial class MainForm : Form
 
     private OcrResult RunPipeline(string path)
     {
-        using Bitmap bitmap = new(path);
-        PaddleOcrResult ocrResult = RunLocked(bitmap);
-        Bitmap annotated = new(bitmap);
-        using Graphics graphics = Graphics.FromImage(annotated);
-        using Pen pen = new(Color.LimeGreen, 3);
-        using Brush brush = new SolidBrush(Color.Red);
-        foreach (PaddleOcrLine line in ocrResult.Lines)
+        Bitmap source = new(path);
+        try
         {
-            Point[] points =
-            [
-                new((int)line.Box.X1, (int)line.Box.Y1),
-                new((int)line.Box.X2, (int)line.Box.Y2),
-                new((int)line.Box.X3, (int)line.Box.Y3),
-                new((int)line.Box.X4, (int)line.Box.Y4)
-            ];
-            graphics.DrawPolygon(pen, points);
-            graphics.DrawString(line.Text, Font, brush, points[0]);
+            PaddleOcrResult ocrResult = RunLocked(source);
+            Bitmap overlay = OcrOverlay.Draw(source, ocrResult.Lines);
+            return new OcrResult(
+                string.Join(Environment.NewLine, ocrResult.Lines.Select(line => line.Text)),
+                ocrResult.DetectedCount,
+                source,
+                overlay);
         }
-
-        return new OcrResult(
-            string.Join(Environment.NewLine, ocrResult.Lines.Select(line => line.Text)),
-            ocrResult.DetectedCount,
-            annotated);
+        catch
+        {
+            source.Dispose();
+            throw;
+        }
     }
 
-    private void SetBitmap(Bitmap bitmap)
+    private void ReplaceImages(Bitmap source, Bitmap? overlay)
     {
-        Bitmap? old = _bitmap;
-        _bitmap = bitmap;
-        preview.Image = bitmap;
-        old?.Dispose();
+        preview.Image = null;
+        Bitmap? oldSource = _sourceBitmap;
+        Bitmap? oldOverlay = _overlayBitmap;
+        _sourceBitmap = source;
+        _overlayBitmap = overlay;
+        RefreshPreview();
+        if (oldSource is not null && oldSource != source)
+            oldSource.Dispose();
+        if (oldOverlay is not null && oldOverlay != overlay)
+            oldOverlay.Dispose();
+    }
+
+    private void RefreshPreview()
+    {
+        if (showOriginal.Checked || _overlayBitmap is null)
+            preview.Image = _sourceBitmap;
+        else
+            preview.Image = _overlayBitmap;
     }
 
     private PaddleOcrResult RunLocked(Bitmap bitmap)
@@ -251,15 +262,17 @@ public partial class MainForm : Form
 
     private sealed class OcrResult
     {
-        public OcrResult(string text, int count, Bitmap annotated)
+        public OcrResult(string text, int count, Bitmap source, Bitmap overlay)
         {
             Text = text;
             Count = count;
-            Annotated = annotated;
+            Source = source;
+            Overlay = overlay;
         }
 
         public string Text { get; }
         public int Count { get; }
-        public Bitmap Annotated { get; }
+        public Bitmap Source { get; }
+        public Bitmap Overlay { get; }
     }
 }

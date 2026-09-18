@@ -59,6 +59,11 @@
                          GroupName="model"
                          IsChecked="True"
                          IsCheckedChanged="Model_IsCheckedChanged" />
+            <CheckBox x:Name="ShowOriginalCheck"
+                      Margin="16,0,0,0"
+                      VerticalAlignment="Center"
+                      Content="显示原图"
+                      IsCheckedChanged="ShowOriginal_IsCheckedChanged" />
         </StackPanel>
 
         <Grid Grid.Row="2" ColumnDefinitions="1*,1*">

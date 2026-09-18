@@ -16,7 +16,8 @@ namespace SkiaSharp.Avalonia;
 
 public partial class MainWindow : Window
 {
-    private AvaloniaBitmap? _previewBitmap;
+    private AvaloniaBitmap? _sourcePreview;
+    private AvaloniaBitmap? _overlayPreview;
     private PaddleOcrAll? _ocr;
     private string _imagePath;
 
@@ -45,6 +46,8 @@ public partial class MainWindow : Window
     private async void SelectImage_Click(object? sender, RoutedEventArgs e) => await SelectImageAsync();
 
     private async void RunOcr_Click(object? sender, RoutedEventArgs e) => await RunOcrAsync();
+
+    private void ShowOriginal_IsCheckedChanged(object? sender, RoutedEventArgs e) => RefreshPreview();
 
     private void Output_TextChanged(object? sender, TextChangedEventArgs e) =>
         OutputPlaceholder.IsVisible = string.IsNullOrWhiteSpace(Output.Text);
@@ -110,7 +113,7 @@ public partial class MainWindow : Window
             if (!File.Exists(_imagePath))
                 throw new FileNotFoundException("图片不存在", _imagePath);
 
-            SetPreviewBitmap(new AvaloniaBitmap(_imagePath));
+            ReplacePreviews(new AvaloniaBitmap(_imagePath), overlay: null);
             Status.Text = $"图片：{_imagePath}    配置：{BuildConfiguration}";
         }
         catch (Exception ex)
@@ -190,14 +193,18 @@ public partial class MainWindow : Window
                     }
                 });
 
-                Status.Text = "正在绘制检测框和识别文本…";
+                Status.Text = "正在绘制就地贴字…";
                 stage.Restart();
-                byte[] annotatedPng = await Task.Run(() => AnnotateAndEncode(bitmap, result));
+                byte[] sourcePng = EncodePng(bitmap);
+                byte[] overlayPng;
+                using (SKBitmap overlay = OcrOverlay.Draw(bitmap, result.Lines))
+                    overlayPng = EncodePng(overlay);
 
                 total.Stop();
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    SetPreviewBitmap(LoadBitmap(annotatedPng));
+                    ShowOriginalCheck.IsChecked = false;
+                    ReplacePreviews(LoadBitmap(sourcePng), LoadBitmap(overlayPng));
                     Output.Text = string.Join(Environment.NewLine, result.Lines.Select(line => line.Text));
                     Status.Text =
                         $"完成：{result.DetectedCount} 行，总耗时 {total.Elapsed.TotalMilliseconds:F1} ms。" +
@@ -228,12 +235,26 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SetPreviewBitmap(AvaloniaBitmap bitmap)
+    private void ReplacePreviews(AvaloniaBitmap source, AvaloniaBitmap? overlay)
     {
-        AvaloniaBitmap? old = _previewBitmap;
-        _previewBitmap = bitmap;
-        Preview.Source = bitmap;
-        old?.Dispose();
+        Preview.Source = null;
+        AvaloniaBitmap? oldSource = _sourcePreview;
+        AvaloniaBitmap? oldOverlay = _overlayPreview;
+        _sourcePreview = source;
+        _overlayPreview = overlay;
+        RefreshPreview();
+        if (oldSource is not null && oldSource != source)
+            oldSource.Dispose();
+        if (oldOverlay is not null && oldOverlay != overlay)
+            oldOverlay.Dispose();
+    }
+
+    private void RefreshPreview()
+    {
+        if (ShowOriginalCheck.IsChecked == true || _overlayPreview is null)
+            Preview.Source = _sourcePreview;
+        else
+            Preview.Source = _overlayPreview;
     }
 
     private static AvaloniaBitmap LoadBitmap(byte[] png)
@@ -254,51 +275,11 @@ public partial class MainWindow : Window
         return converted ?? throw new InvalidDataException("无法转换到 BGRA。");
     }
 
-    private static byte[] AnnotateAndEncode(SKBitmap bitmap, PaddleOcrResult result)
+    private static byte[] EncodePng(SKBitmap bitmap)
     {
-        using SKCanvas canvas = new(bitmap);
-        float fontSize = Math.Clamp(Math.Min(bitmap.Width, bitmap.Height) / 45f, 14f, 40f);
-        using SKPaint boxPaint = new()
-        {
-            IsAntialias = true,
-            Color = SKColors.LimeGreen,
-            Style = SKPaintStyle.Stroke,
-            StrokeWidth = Math.Max(2f, fontSize / 8f)
-        };
-        using SKPaint textPaint = new()
-        {
-            IsAntialias = true,
-            Color = SKColors.Red
-        };
-        using SKTypeface typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI", SKFontStyle.Bold);
-        using SKFont font = new(typeface, fontSize, 1, 0);
-        foreach (PaddleOcrLine line in result.Lines)
-        {
-            SKPoint[] points =
-            [
-                new(line.Box.X1, line.Box.Y1),
-                new(line.Box.X2, line.Box.Y2),
-                new(line.Box.X3, line.Box.Y3),
-                new(line.Box.X4, line.Box.Y4)
-            ];
-
-            for (int index = 0; index < points.Length; index++)
-                canvas.DrawLine(points[index], points[(index + 1) % points.Length], boxPaint);
-
-            string text = string.IsNullOrWhiteSpace(line.Text) ? "(空)" : line.Text;
-            float minX = Math.Clamp(
-                Math.Min(Math.Min(points[0].X, points[1].X), Math.Min(points[2].X, points[3].X)),
-                0,
-                bitmap.Width - 1);
-            float minY = Math.Min(Math.Min(points[0].Y, points[1].Y), Math.Min(points[2].Y, points[3].Y));
-            float textX = minX;
-            float textY = Math.Clamp(minY - 6, fontSize, bitmap.Height - 2);
-            canvas.DrawText(text, textX, textY, SKTextAlign.Left, font, textPaint);
-        }
-
         using SKImage image = SKImage.FromBitmap(bitmap);
         using SKData data = image.Encode(SKEncodedImageFormat.Png, 100)
-            ?? throw new InvalidOperationException("无法编码标注图片");
+            ?? throw new InvalidOperationException("无法编码图片");
         return data.ToArray();
     }
 
@@ -306,7 +287,10 @@ public partial class MainWindow : Window
     {
         _ocr?.Dispose();
         _ocr = null;
-        _previewBitmap?.Dispose();
-        _previewBitmap = null;
+        Preview.Source = null;
+        _sourcePreview?.Dispose();
+        _sourcePreview = null;
+        _overlayPreview?.Dispose();
+        _overlayPreview = null;
     }
 }

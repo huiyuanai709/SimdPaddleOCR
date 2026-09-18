@@ -59,6 +59,12 @@
                          Checked="Model_Checked"
                          Content="medium"
                          GroupName="model" />
+            <CheckBox x:Name="ShowOriginalCheck"
+                      Margin="16,0,0,0"
+                      VerticalAlignment="Center"
+                      Content="显示原图"
+                      Checked="ShowOriginal_Changed"
+                      Unchecked="ShowOriginal_Changed" />
         </StackPanel>
 
         <Grid Grid.Row="2">
