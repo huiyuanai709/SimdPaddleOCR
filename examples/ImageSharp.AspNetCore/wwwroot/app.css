@@ -107,6 +107,10 @@ button:disabled {
   align-items: center;
 }
 
+.models .show-original {
+  margin-left: auto;
+}
+
 .layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -190,4 +194,6 @@ footer.error { color: var(--danger); }
   .toolbar { grid-template-columns: 1fr 1fr; }
   .path, .primary { grid-column: 1 / -1; }
   .layout { grid-template-columns: 1fr; }
+  .models { flex-wrap: wrap; }
+  .models .show-original { margin-left: 0; }
 }

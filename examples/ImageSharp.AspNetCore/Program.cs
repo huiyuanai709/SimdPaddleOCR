@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Scalar.AspNetCore;
 using Sdcb.SimdPaddleOCR;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.PixelFormats;
 
 const long maxUploadBytes = 20 * 1024 * 1024;
@@ -69,12 +70,18 @@ static async Task<IResult> RecognizeAsync(
     try
     {
         await using Stream stream = file.OpenReadStream();
-        using Image<Rgba32> image = await Image.LoadAsync<Rgba32>(stream, cancellationToken);
+        using Image<Rgba32> image = await Image.LoadAsync<Rgba32>(OcrImageDecode.Options, stream, cancellationToken);
         if ((long)image.Width * image.Height > OcrEngine.MaxImagePixels)
             return Results.BadRequest(new OcrError("图片像素超过上限（4000 万）。"));
 
+        Rgba32[]? packedCopy = null;
         if (!image.DangerousTryGetSinglePixelMemory(out Memory<Rgba32> memory))
-            return Results.BadRequest(new OcrError("图片像素不是连续内存，无法零拷贝推理。"));
+        {
+            packedCopy = new Rgba32[checked(image.Width * image.Height)];
+            image.CopyPixelDataTo(packedCopy);
+            memory = packedCopy;
+        }
+
         double decodeMs = stage.Elapsed.TotalMilliseconds;
 
         stage.Restart();
@@ -149,4 +156,18 @@ internal sealed class OcrUpload
 {
     public IFormFile? File { get; init; }
     public string? Model { get; init; }
+}
+
+// Clone Default so PNG/JPEG decoders stay registered. Do not set this on Configuration.Default.
+file static class OcrImageDecode
+{
+    public static readonly DecoderOptions Options = CreateOptions();
+
+    static DecoderOptions CreateOptions()
+    {
+        Configuration configuration = Configuration.Default.Clone();
+        // Default allocator splits pixels into 4MB chunks; large images then fail DangerousTryGetSinglePixelMemory. OCR needs one packed RGBA buffer.
+        configuration.PreferContiguousImageBuffers = true;
+        return new DecoderOptions { Configuration = configuration };
+    }
 }

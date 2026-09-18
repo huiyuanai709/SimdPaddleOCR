@@ -2,13 +2,14 @@ const fileInput = document.querySelector("#file");
 const sampleButton = document.querySelector("#sample");
 const fileName = document.querySelector("#fileName");
 const runButton = document.querySelector("#run");
+const showOriginal = document.querySelector("#showOriginal");
 const canvas = document.querySelector("#canvas");
 const placeholder = document.querySelector("#placeholder");
 const drop = document.querySelector("#drop");
 const output = document.querySelector("#output");
 const curl = document.querySelector("#curl");
 const status = document.querySelector("#status");
-const ctx = canvas.getContext("2d");
+const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
 let currentFile = null;
 let previewUrl = null;
@@ -51,31 +52,13 @@ function revokePreview() {
 
 function drawPreview(result) {
   if (!image) return;
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
   canvas.hidden = false;
   placeholder.hidden = true;
-  ctx.drawImage(image, 0, 0);
-  if (!result?.lines?.length) return;
+  OcrOverlay.draw(ctx, image, result?.lines, { showOriginal: showOriginal.checked });
+}
 
-  const fontSize = Math.min(40, Math.max(14, Math.min(canvas.width, canvas.height) / 45));
-  ctx.lineWidth = Math.max(2, fontSize / 8);
-  ctx.strokeStyle = "#32cd32";
-  ctx.fillStyle = "#ff0000";
-  ctx.font = `bold ${fontSize}px "Microsoft YaHei UI", "Segoe UI", sans-serif`;
-  ctx.textBaseline = "bottom";
-
-  for (const line of result.lines) {
-    const box = line.box;
-    if (!box || box.length !== 4) continue;
-    ctx.beginPath();
-    ctx.moveTo(box[0][0], box[0][1]);
-    for (let i = 1; i < 4; i++) ctx.lineTo(box[i][0], box[i][1]);
-    ctx.closePath();
-    ctx.stroke();
-    const label = line.text ?? "";
-    if (label) ctx.fillText(label, box[0][0], Math.max(fontSize, box[0][1] - 2));
-  }
+function redraw() {
+  drawPreview(lastResult);
 }
 
 async function loadFile(file, name) {
@@ -111,6 +94,7 @@ async function runOcr() {
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     lastResult = data;
     output.value = data.text || "";
+    showOriginal.checked = false;
     drawPreview(data);
     const elapsed = data.elapsedMs;
     setStatus(
@@ -126,28 +110,34 @@ async function runOcr() {
   }
 }
 
-fileInput.addEventListener("change", async () => {
-  const file = fileInput.files?.[0];
-  if (file) await loadFile(file);
-});
-
-sampleButton.addEventListener("click", async () => {
+async function loadRemoteImage(url, name, missingMessage) {
   setBusy(true);
-  setStatus("正在加载示例图…");
+  setStatus(`正在加载 ${name}…`);
   try {
-    const response = await fetch("/sample.jpg");
-    if (!response.ok) throw new Error("未找到示例图 examples/sample.jpg");
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(missingMessage);
     const blob = await response.blob();
-    await loadFile(new File([blob], "sample.jpg", { type: "image/jpeg" }), "sample.jpg");
+    await loadFile(new File([blob], name, { type: blob.type || "image/png" }), name);
   } catch (err) {
     setStatus(err.message, true);
   } finally {
     setBusy(false);
   }
+}
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files?.[0];
+  if (file) await loadFile(file);
 });
+
+sampleButton.addEventListener("click", () => loadRemoteImage(
+  "/sample.jpg",
+  "sample.jpg",
+  "未找到示例图 examples/sample.jpg"));
 
 runButton.addEventListener("click", runOcr);
 document.querySelectorAll('input[name="model"]').forEach((el) => el.addEventListener("change", updateCurl));
+showOriginal.addEventListener("change", redraw);
 
 ["dragenter", "dragover"].forEach((eventName) => {
   drop.addEventListener(eventName, (event) => {
