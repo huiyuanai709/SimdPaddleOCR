@@ -516,6 +516,32 @@ public sealed class Model : IDisposable
                     node.Attributes.Add(MakeFloats("scales", scales));
                 }
             }
+            else if (node.OpType is ("Squeeze" or "Unsqueeze") && node.Inputs.Count > 1 &&
+                     node.Attributes.All(a => a.Name != "axes"))
+            {
+                // ONNX opset 13+ moved axes from an attribute to a tensor input.
+                // Fold a constant axes input into the existing 40-byte parameter
+                // block so Squeeze/Unsqueeze stay attribute-driven at runtime.
+                // An empty axes attribute otherwise means "squeeze every size-1
+                // axis", which collapses PP-OCRv5 rec's [N,C,1,W] neck into
+                // rank-3 and blows up Conv shape inference. Fail loud when the
+                // second input is present but cannot be folded — leaving the
+                // node as "squeeze all 1s" turns the next Conv into a late,
+                // hard-to-attribute rank error.
+                string axesInput = Resolve(node.Inputs[1]);
+                if (axesInput.Length == 0 || !initializers.TryGetValue(axesInput, out OnnxTensorData? axesTensor))
+                    throw new InvalidDataException(
+                        $"{node.OpType} '{node.Name}' axes input '{axesInput}' is not a constant initializer.");
+                long[] axes = TensorInts(axesTensor);
+                if (axes.Length == 0)
+                    throw new InvalidDataException(
+                        $"{node.OpType} '{node.Name}' axes tensor '{axesInput}' is empty or not integer.");
+                if (axes.Length > 8)
+                    throw new InvalidDataException(
+                        $"{node.OpType} '{node.Name}' has {axes.Length} axes; at most 8 are supported.");
+                node.Attributes.Add(MakeInts("axes", axes));
+                node.Inputs.RemoveRange(1, node.Inputs.Count - 1);
+            }
             NormalizeSameUpper(node);
             string[] resolvedInputs = [.. node.Inputs.Select(Resolve)];
             string[] resolvedOutputs = [.. node.Outputs.Select(Resolve)];
@@ -1045,6 +1071,26 @@ public sealed class Model : IDisposable
             return (type, data);
         }
         return (type, tensor.StringData.SelectMany(static x => x).ToArray());
+    }
+
+    private static long[] TensorInts(OnnxTensorData tensor)
+    {
+        (DType type, byte[] data) = TensorBytes(tensor);
+        if (type == DType.I64 && data.Length % 8 == 0)
+        {
+            long[] values = new long[data.Length / 8];
+            for (int i = 0; i < values.Length; i++)
+                values[i] = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(i * 8, 8));
+            return values;
+        }
+        if (type == DType.I32 && data.Length % 4 == 0)
+        {
+            long[] values = new long[data.Length / 4];
+            for (int i = 0; i < values.Length; i++)
+                values[i] = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(i * 4, 4));
+            return values;
+        }
+        return [];
     }
 
     private static float[] TensorFloats(OnnxTensorData tensor)

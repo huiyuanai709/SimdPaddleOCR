@@ -544,7 +544,9 @@ public sealed class CompiledModel
             {
                 OperatorId.Add or OperatorId.Mul or OperatorId.Div or OperatorId.Sub or OperatorId.Pow => BroadcastShape(a, shapes[node.Inputs[1]], ni, node.Operator),
                 OperatorId.Erf or OperatorId.HardSigmoid or OperatorId.Relu or OperatorId.Sigmoid or OperatorId.Sqrt or OperatorId.Softmax or OperatorId.BatchNormalization => [.. a],
-                OperatorId.Conv => ConvShape(a, shapes[node.Inputs[1]], p),
+                OperatorId.Conv => a.Length == 4
+                    ? ConvShape(a, shapes[node.Inputs[1]], p)
+                    : throw new InvalidDataException($"Conv '{node.Name}' at node {ni} requires rank-4, got [{string.Join(",", a)}]."),
                 OperatorId.ConvTranspose => ConvTransposeShape(a, shapes[node.Inputs[1]], p),
                 OperatorId.ReduceMean => ReduceShape(a, p),
                 OperatorId.AveragePool or OperatorId.MaxPool => PoolShape(a, p),
