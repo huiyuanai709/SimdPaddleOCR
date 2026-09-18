@@ -19,7 +19,7 @@
 
 ### 怎么读
 
-- **墙钟**是去掉首张 warmup 后的 **median ms/图**（bench 99 张，smoke 19 张）。
+- **墙钟**是去掉前 5 张 warmup 后的 **median ms/图**（bench 95 张，smoke 15 张）。准确率和 ΔWS（初始化后 → 全部跑完）按 100 / 20 张满勤。下文 1.4 表仍是当时「首张 warmup、准确率也跳过首张」的尺子。
 - 每个 replica 是一台独立的 GitHub-hosted VM。先在单 replica 内算比值，再只汇总 **同一 CPU**。
 - GitHub `windows-2025` 会随机分到 EPYC 7763 / 9V74 / Xeon。**7763 没有 AVX-512**；9V74 / Xeon 有时走 AVX-512。这两类绝对时间不可比。
 - 4 worker 下算子会并行重叠，**之和可以大于墙钟**，只适合看结构。

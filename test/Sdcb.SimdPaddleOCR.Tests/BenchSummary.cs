@@ -91,7 +91,7 @@ static class BenchSummary
 
     public static JsonObject BuildSummary(List<BenchmarkRow> rows, JsonObject meta)
     {
-        BenchmarkRow? warmup = rows.FirstOrDefault(r => r.Warmup);
+        List<BenchmarkRow> warmups = rows.Where(r => r.Warmup).ToList();
         List<BenchmarkRow> measured = rows.Where(r => !r.Warmup).ToList();
         double[] totals = measured.Select(r => r.TotalMs).ToArray();
         var (mean, median, p95) = Stats(totals);
@@ -102,7 +102,7 @@ static class BenchSummary
         var summary = new JsonObject
         {
             ["n"] = measured.Count,
-            ["warmup"] = rows.Count(r => r.Warmup),
+            ["warmup"] = warmups.Count,
             ["total_ms"] = new JsonObject
             {
                 ["mean"] = mean,
@@ -119,8 +119,8 @@ static class BenchSummary
                 ["total"] = lineTotal,
             },
         };
-        if (warmup is not null)
-            summary["warmup_ms"] = warmup.TotalMs;
+        if (warmups.Count > 0)
+            summary["warmup_ms"] = warmups.Average(r => r.TotalMs);
         if (slowest is not null)
         {
             summary["slowest"] = new JsonObject
@@ -248,7 +248,7 @@ static class BenchSummary
         long errors = 0, totalChars = 0;
         foreach (JsonNode? rowNode in rows)
         {
-            if (rowNode is not JsonObject row || row["warmup"]?.GetValue<bool>() == true)
+            if (rowNode is not JsonObject row)
                 continue;
             string? file = row["file"]?.GetValue<string>();
             if (file is null || !groundTruth.TryGetValue(file, out List<string>? gtLines))
@@ -313,7 +313,7 @@ static class BenchSummary
     {
         var (mean, median, p95) = Stats(run.Totals.Select(t => t.Value).ToArray());
         Console.WriteLine();
-        Console.WriteLine($"=== summary: {run.Label} (n={run.Totals.Count}, excl warmup) ===");
+        Console.WriteLine($"=== summary: {run.Label} (n={run.Totals.Count}, timing excl warmup) ===");
         Console.WriteLine($"total_ms mean={mean:F1} median={median:F1} p95={p95:F1}");
         if (run.Accuracy is { } accuracy)
         {
@@ -381,7 +381,7 @@ static class BenchSummary
         if (runs.Any(r => r.Accuracy is not null))
         {
             Emit();
-            Emit("=== accuracy (GT, excl warmup) ===");
+            Emit("=== accuracy (GT, all images) ===");
             Emit("run".PadRight(36) + " " + "exact_lines".PadLeft(16) + " " +
                 "exact_img".PadLeft(12) + " " + "CER".PadLeft(8) + " " + "char_acc".PadLeft(9));
             foreach (RunResult r in runs)

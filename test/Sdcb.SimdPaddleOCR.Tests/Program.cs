@@ -116,6 +116,10 @@ long allocatedAtLoad = GC.GetTotalAllocatedBytes(precise: true);
 double wsPeak = wsLoaded;
 Console.WriteLine(engine.LoadedMessage(wsLoaded));
 
+// First images heat JIT / CPU P-states. Timing summaries drop them;
+// accuracy and ΔWS (loaded → last image) still cover the full set.
+const int warmupImages = 5;
+int warmupCount = Math.Min(warmupImages, Math.Max(0, decoded.Length - 1));
 List<BenchmarkRow> rows = [];
 for (int index = 0; index < decoded.Length; index++)
 {
@@ -130,7 +134,7 @@ for (int index = 0; index < decoded.Length; index++)
         File = d.Name,
         Width = d.W,
         Height = d.H,
-        Warmup = index == 0,
+        Warmup = index < warmupCount,
         TotalMs = sw.Elapsed.TotalMilliseconds,
         StageMs = result.StageMs,
         StageCalls = result.StageCalls,
