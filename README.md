@@ -146,7 +146,7 @@ dotnet run --project examples/SystemDrawing.WinForms --framework net10.0-windows
 
 Web 示例打开站点即可上传；API 为 `POST /api/ocr`（`multipart/form-data` 字段 `file`、`model`），文档在 `/scalar`。
 
-`Sdcb.SimdPaddleOCR` 还带 4 个 LINQPad 脚本（`imagesharp` / `skiasharp` / `opencvsharp5` / `bitmap`）：下载示例图，tiny 模型识别，控制台输出文字。包打了 `linqpad-samples` 标签，免费版也能用。
+`Sdcb.SimdPaddleOCR` 还带 4 个 LINQPad 脚本（`imagesharp` / `skiasharp` / `opencvsharp5` / `bitmap`）：下载示例图，tiny 模型识别，控制台输出文字。`bitmap` 同时能在 LINQPad 5 / .NET Framework 4.8 和 .NET 10 上跑。包打了 `linqpad-samples` 标签，免费版也能用。
 
 ## 常见问题
 
