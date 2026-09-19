@@ -215,8 +215,8 @@ Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image 
 | win-x64 7763 `tiny-4w-noavx` | 481 | **380** | **0.79×** | |
 | win-x64 7763 `tiny-4w-scalar` | 1368 | **1220** | **0.89×** | |
 
-Local Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images (n=99), this library mean: small **237.5 → 204 ms** (0.86×), medium **641 → 564 ms** (0.88×).
-1.3 same-machine OpenVINO / c and per-ISA ratios: [`docs/perf.md`](docs/perf.md).
+Local Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images (n=99), this library mean (1.3 NuGet → 1.4): tiny **86.0 → 63.1 ms** (0.73×), small **222 → 200 ms** (0.90×), medium **628 → 585 ms** (0.93×). Same machine ns2: tiny **203 → 96.5 ms** (0.48×), small **432 → 303 ms** (0.70×), medium **1606 → 874 ms** (0.54×).
+Same-machine C engine and per-ISA ratios: [`docs/perf.md`](docs/perf.md).
 
 ## Reproducing performance
 

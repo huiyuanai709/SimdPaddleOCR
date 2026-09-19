@@ -215,8 +215,8 @@ GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 | win-x64 7763 `tiny-4w-noavx`              |     481 |  **380** |    **0.79×** |                  |
 | win-x64 7763 `tiny-4w-scalar`             |    1368 | **1220** |    **0.89×** |                  |
 
-本机 Ryzen 7 5800X、4 worker、仓库 `dataset/` 100 张（n=99）本库 mean：small **237.5 → 204 ms**（0.86×），medium **641 → 564 ms**（0.88×）。
-1.3 同机 OpenVINO / c 以及各 ISA 比值见 [`docs/perf.md`](docs/perf.md)。
+本机 Ryzen 7 5800X、4 worker、仓库 `dataset/` 100 张（n=99）本库 mean（1.3 NuGet → 1.4）：tiny **86.0 → 63.1 ms**（0.73×），small **222 → 200 ms**（0.90×），medium **628 → 585 ms**（0.93×）。同机 ns2：tiny **203 → 96.5 ms**（0.48×），small **432 → 303 ms**（0.70×），medium **1606 → 874 ms**（0.54×）。
+同机 C 引擎与各 ISA 比值见 [`docs/perf.md`](docs/perf.md)。
 
 ## 性能复现
 
