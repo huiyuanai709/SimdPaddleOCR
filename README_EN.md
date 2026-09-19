@@ -201,7 +201,7 @@ respective owners. This project is not official and does not imply endorsement.
 
 **1.4** vs **1.3.0**: graph-level NHWC now covers ns2 / x64 scalar / net10 AdvSIMD, and preprocess writes NHWC directly.
 **Memory dropped sharply**: tiny-4w working-set peak is about **300 MB** lower (win-x64 817→**515 MB**, linux-arm64 840→**572 MB**); Δ WS fell from ~400 MB to ~100–160 MB.
-Accuracy is unchanged (tiny bench 757/1022, CER 3.53%).
+CI tiny is **766/1032**, CER 3.22% on the full 100 (1.3 skip-first was 757/1022, 3.53% — different ruler, not a tiny gain). Local medium CER **0.67% → 0.26%** (`ClsResizeImg` keep-aspect, thin Latin lines no longer flip 0/180); tiny / small are unchanged on the same set.
 
 Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
 

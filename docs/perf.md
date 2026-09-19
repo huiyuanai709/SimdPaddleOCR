@@ -3,7 +3,7 @@
 ## 怎么读
 
 - **墙钟**：去掉首张 warmup 后的 **median ms/图**（`--warmup 1`）。本机 5800X 表额外报 mean，和 median 几乎重合。
-- **准确率、Δ WS**：初始化后满勤（100 张）。CI 下文 1.4 数字仍是当时「准确率也跳过首张」的尺子（tiny bench **757/1022**）；本机 5800X 是满勤 **1036** 行。
+- **准确率、Δ WS**：初始化后满勤（100 张 / smoke 20 张），**不再跳过首张**。CI tiny bench 是 **766/1032、CER 3.22%**；本机 5800X 是 **742/1036、2.78%**。两边都是 `windows` 生成机、字体齐，但是各自出的图，行数就是 **1032** 和 **1036**，不要对绝对 exact。1.3 CI 仍是跳过首张的 **757/1022、3.53%**；和 766/1032 对不上涨幅（99 张 vs 100 张，行精确 74.1% vs 74.2%）。质量变化看本机同尺子：tiny / small 没动，medium CER **0.67% → 0.26%**（`1c06dee` CLS keep-aspect）。
 - **replica**：每台 GitHub-hosted VM 一份。先在单 replica 内算比值，再只汇总 **同一 CPU**。
 - GitHub `windows-2025` 会随机分到 EPYC 7763 / 9V74 / Xeon。**7763 没有 AVX-512**；9V74 / Xeon 有时走 AVX-512。这两类绝对时间不可比。
 - 4 worker 下算子会并行重叠，**之和可以大于墙钟**，只适合看结构。
@@ -22,12 +22,13 @@
 | net10 AdvSIMD（linux-arm64 / osx-arm64）    | NCHW                   | **手写 NHWC NEON tile**                                                            |
 | 公开 `InferenceSession.Run`                 | 逻辑 NCHW              | 仍收逻辑 NCHW；图输入已标 NHWC 时入口自动转置                                      |
 | 像素格式                                    | 只认紧排 BGR           | 默认仍 `Bgr24`；RGB24 / BGRA32 / RGBA32 在 resize / warp 就地 gather，不摊中间 BGR |
+| CLS 预处理                                  | PaddleX 拉伸 160×80 + ImageNet RGB | PaddleOCR `ClsResizeImg` 保比例、右侧 pad `-1`、REC 归一化 BGR（细长拉丁行不再被拉扁后 0/180 翻面） |
 
 `PPOCR_NHWC=0` 仍可整图关回 NCHW。CI 不再跑 OpenVINO.NET。像素格式不增加整图缓冲：gather 写的是已经要做的双线性 / cubic scratch。
 
 结论（细节在后面两节）：
 
-- **正确率**：CI tiny bench 仍是 sharp 757/1022、CER 3.53%；c 759/1022、4.18%。本机 tiny / small 1.3 与 1.4 逐项相同；medium CER 0.67% → 0.26%。
+- **正确率**：CI tiny bench sharp **766/1032、CER 3.22%**（各 ISA / ns2 / scalar 相同）；c **764/1032、4.25%**。相对 1.3 的 757/1022、3.53% 是满勤口径，不能当 CI tiny 涨了。本机 tiny / small 逐项相同；medium exact 1002 → **1004**、CER **0.67% → 0.26%**，这是 `1c06dee` CLS keep-aspect。
 - **墙钟**：CI 上收益在 ns2 / noavx / scalar / ARM AdvSIMD；x64 AVX2 默认路径和 1.3 持平（噪声）。本机 tiny net10 **0.73×**，ns2 三个模型 **0.48–0.70×**。
 - **内存**：tiny-4w 工作集峰值大约少 **300 MB**（7763 817→515，N2 840→572）。主要是 NHWC workspace 别名，以及预处理直写 NHWC、不再为输入 `LayoutConvert` 留第二份缓冲。
 
@@ -46,7 +47,7 @@ win-x64 SIMD 先丢一次 25 张 tiny-4w 烤 VM（不上传），再跑默认 / 
 
 数据集、模型、预解码 BGR、ISA 开关、runner：`.github/workflows/test.yml`，`dataset/` 固定种子合成 100 张 JPG。库 TFM 默认 `net10.0`；`tiny-4w-ns2` 把库编成 `netstandard2.0`，仍跑在 .NET 10 上。
 
-正确率（100 张 bench，跳过首张）：sharp **757/1022、CER 3.53%**（含 scalar、ns2、全部 ISA）；c 759/1022、4.18%。smoke：tiny 152/208，small 188/208，medium 200/208。
+正确率（100 张满勤）：sharp **766/1032、CER 3.22%**（含 scalar、ns2、全部 ISA）；c **764/1032、4.25%**。smoke 20 张满勤：tiny **160/218**，small **198/218**，medium **210/218**。
 
 ### linux-arm64 N2（最稳，6 replica）
 
@@ -112,19 +113,19 @@ win-x64 SIMD 先丢一次 25 张 tiny-4w 烤 VM（不上传），再跑默认 / 
 
 ### 平台 smoke（20 张，只看覆盖）
 
-CPU 每次都会变。1.4 [35241030966](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35241030966) 行精确与 1.3 相同。
+CPU 每次都会变。行精确按 **20 张满勤**（[35361330684](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35361330684)）；中位 ms / CPU 仍用 [35241030966](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35241030966)，只看覆盖。旧口径 152/208 是跳过首张，满勤是 **160/218**。
 
 | RID              | 1.4 这次 CPU | ISA     | 中位 ms |  行精确 |
 | ---------------- | ------------ | ------- | ------: | ------: |
-| linux-arm64      | N2           | AdvSimd |     227 | 152/208 |
-| linux-x64 tiny   | 7763         | AVX2    | 324–352 | 152/208 |
-| linux-x64 small  | 7763         | AVX2    |     958 | 188/208 |
-| linux-x64 medium | 7763         | AVX2    |    5200 | 200/208 |
-| win-x64          | 9V45         | AVX-512 |     138 | 152/208 |
-| win-x86          | 9V74         | AVX2    |     406 | 152/208 |
-| win-arm64        | Cobalt 100   | AdvSimd |     213 | 152/208 |
-| osx-arm64        | M1 Virtual   | AdvSimd |     324 | 152/208 |
-| osx-x64          | i7-8700B     | AVX2    |     217 | 152/208 |
+| linux-arm64      | N2           | AdvSimd |     227 | 160/218 |
+| linux-x64 tiny   | 7763         | AVX2    | 324–352 | 160/218 |
+| linux-x64 small  | 7763         | AVX2    |     958 | 198/218 |
+| linux-x64 medium | 7763         | AVX2    |    5200 | 210/218 |
+| win-x64          | 9V45         | AVX-512 |     138 | 160/218 |
+| win-x86          | 9V74         | AVX2    |     406 | 160/218 |
+| win-arm64        | Cobalt 100   | AdvSimd |     213 | 160/218 |
+| osx-arm64        | M1 Virtual   | AdvSimd |     324 | 160/218 |
+| osx-x64          | i7-8700B     | AVX2    |     217 | 160/218 |
 
 small 大约是 tiny 的 3 倍墙钟，medium 大约是 tiny 的 15–17 倍；CER 从 3.7% → 1.6% → 0.34%。
 
@@ -176,7 +177,8 @@ JSON：`bench-out/local-5800x-c-{tiny,small,medium}-4w.json`。
 | 版本       | Actions                                                                       | 提交      | 说明                                          |
 | ---------- | ----------------------------------------------------------------------------- | --------- | --------------------------------------------- |
 | **1.3.0**  | [34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921) | `37fe1fd` | 只 AVX2 NHWC；ns2 / ARM / scalar 仍 NCHW      |
-| **1.4**    | [35241030966](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35241030966) | `b784d28` | 全路径 NHWC + 像素格式；CI「1.4」默认指这次   |
+| **1.4**    | [35241030966](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35241030966) | `b784d28` | 全路径 NHWC + 像素格式；下文 7763 / N2 **墙钟**默认指这次 |
+| 1.4 复核   | [35361330684](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35361330684) | `97c1448` | 准确率改满勤 100 张（766/1032）；墙钟与 1.3 比意思不变。SIMD 7763 只有 1 份，不重写中位表 |
 | 1.4 前一次 | [35217602432](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35217602432) | `67cf1fa` | 内核已是 1.4；用来给 win-x64 7763 补样本      |
 | 本机 5800X | —                                                                             | `97c1448` | 发布前同机；1.3 用 NuGet 1.3.0，1.4 用当前树  |
 

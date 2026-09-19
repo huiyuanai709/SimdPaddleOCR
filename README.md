@@ -201,7 +201,7 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 
 **1.4** 相对 **1.3.0**：图级 NHWC 从仅 AVX2 扩到 ns2 / x64 scalar / net10 AdvSIMD，预处理直接写 NHWC。
 **内存占用大幅下降**：tiny-4w 工作集峰值大约少 **300 MB**（win-x64 817→**515 MB**，linux-arm64 840→**572 MB**），Δ WS 从约 400 MB 降到约 100–160 MB。
-正确率不变（tiny bench 757/1022，CER 3.53%）。
+CI tiny 满勤 **766/1032**、CER 3.22%（1.3 跳过首张是 757/1022、3.53%，尺子不同，不能当涨幅）。本机 medium CER **0.67% → 0.26%**（`ClsResizeImg` 保比例，细长拉丁行不再 0/180 翻面）；tiny / small 同尺子没动。
 
 GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 
