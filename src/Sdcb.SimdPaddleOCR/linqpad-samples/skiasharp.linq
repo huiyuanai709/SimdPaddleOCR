@@ -7,6 +7,7 @@
   <Namespace>Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny</Namespace>
   <Namespace>SkiaSharp</Namespace>
   <Namespace>System.Net.Http</Namespace>
+  <Namespace>System.Threading.Tasks</Namespace>
 </Query>
 
 async Task Main()
@@ -28,9 +29,9 @@ async Task Main()
 
 static SKBitmap DecodeBgra(byte[] jpeg)
 {
-	SKBitmap decoded = SKBitmap.Decode(jpeg) ?? throw new InvalidDataException("无法读取图片");
+	SKBitmap decoded = SKBitmap.Decode(jpeg) ?? throw new InvalidDataException("Failed to decode image");
 	if (decoded.ColorType == SKColorType.Bgra8888) return decoded;
 	SKBitmap? bgra = decoded.Copy(SKColorType.Bgra8888);
 	decoded.Dispose();
-	return bgra ?? throw new InvalidDataException("无法转换到 BGRA");
+	return bgra ?? throw new InvalidDataException("Failed to convert to BGRA");
 }

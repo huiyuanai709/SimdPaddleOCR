@@ -1,6 +1,8 @@
 <Query Kind="Program">
   <AllowUnsafe>true</AllowUnsafe>
   <NuGetReference>OpenCvSharp5</NuGetReference>
+  <NuGetReference>OpenCvSharp5.runtime.osx.arm64</NuGetReference>
+  <NuGetReference>OpenCvSharp5.runtime.osx.x64</NuGetReference>
   <NuGetReference>OpenCvSharp5.runtime.win</NuGetReference>
   <NuGetReference>Sdcb.SimdPaddleOCR</NuGetReference>
   <NuGetReference>Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny</NuGetReference>
@@ -8,6 +10,7 @@
   <Namespace>Sdcb.SimdPaddleOCR</Namespace>
   <Namespace>Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny</Namespace>
   <Namespace>System.Net.Http</Namespace>
+  <Namespace>System.Threading.Tasks</Namespace>
 </Query>
 
 async Task Main()
@@ -17,7 +20,7 @@ async Task Main()
 
 	using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default);
 	using Mat image = Cv2.ImDecode(jpeg, ImreadModes.Color);
-	if (image.Empty()) throw new InvalidDataException("无法读取图片");
+	if (image.Empty()) throw new InvalidDataException("Failed to decode image");
 
 	int stride = (int)image.Step();
 	unsafe
