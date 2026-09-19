@@ -31,7 +31,7 @@
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdPaddleOCR'">
     <Version>$(SdcbSimdPaddleOCRVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Pure-managed PP-OCRv6 inference library. Accepts packed BGR8 memory only.</Description>
+    <Description>Pure C# PP-OCRv6 inference (DET + CLS + REC). SIMD-optimized, with no Paddle Inference, ONNX Runtime, or OpenCV native libraries. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32.</Description>
     <PackageTags>Sdcb;AI;OCR;PaddleOCR;PP-OCRv6;linqpad-samples</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdPaddleOCR.ModelProvider'">
