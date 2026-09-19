@@ -146,6 +146,8 @@ dotnet run --project examples/SystemDrawing.WinForms --framework net10.0-windows
 
 Open the web sample in a browser to upload; the API is `POST /api/ocr` (`multipart/form-data` fields `file`, `model`), docs at `/scalar`.
 
+`Sdcb.SimdPaddleOCR` also ships 4 LINQPad scripts (`imagesharp` / `skiasharp` / `opencvsharp5` / `bitmap`): download a sample image, run the tiny model, print text. The package is tagged `linqpad-samples`, so the free edition can use them.
+
 ## FAQ
 
 ### Why is OCR recognition much slower while debugging?

@@ -16,6 +16,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Sdcb.SimdPaddleOCR.ModelProvider\Sdcb.SimdPaddleOCR.ModelProvider.csproj" />
     <None Include="..\..\README.md" Pack="true" PackagePath="README.md" />
+    <None Include="linqpad-samples\*.linq" Pack="true" PackagePath="linqpad-samples" />
   </ItemGroup>
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="Microsoft.Bcl.Numerics" Version="10.0.11" />

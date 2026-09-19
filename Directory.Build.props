@@ -32,6 +32,7 @@
     <Version>$(SdcbSimdPaddleOCRVersion)</Version>
     <IsPackable>true</IsPackable>
     <Description>Pure-managed PP-OCRv6 inference library. Accepts packed BGR8 memory only.</Description>
+    <PackageTags>Sdcb;AI;OCR;PaddleOCR;PP-OCRv6;linqpad-samples</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdPaddleOCR.ModelProvider'">
     <Version>$(SdcbSimdPaddleOCRModelProviderVersion)</Version>
