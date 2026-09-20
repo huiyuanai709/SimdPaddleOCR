@@ -4,7 +4,7 @@
 
 Pure C# PP-OCRv6 inference library: multi-platform SIMD, low memory use, and high accuracy.
 It ships a managed ONNX interpreter and does not depend on Paddle Inference, ONNX Runtime, or OpenCV native libraries.
-1.4 extends graph-level NHWC to ns2, x64 scalar, and net10 AdvSIMD, with lower memory use and unchanged accuracy.
+1.4 extends graph-level NHWC to ns2, x64 scalar, and net10 AdvSIMD, with lower memory use and more stable 0/180 on long lines.
 
 The core API accepts interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 are also first-class). It does not decode images, so ImageSharp, SkiaSharp, or OpenCvSharp are not required.
 
@@ -203,7 +203,7 @@ respective owners. This project is not official and does not imply endorsement.
 
 **1.4** vs **1.3.0**: graph-level NHWC now covers ns2 / x64 scalar / net10 AdvSIMD, and preprocess writes NHWC directly.
 **Memory dropped sharply**: tiny-4w working-set peak is about **300 MB** lower (win-x64 817→**515 MB**, linux-arm64 840→**572 MB**); Δ WS fell from ~400 MB to ~100–160 MB.
-CI tiny is **766/1032**, CER 3.22% on the full 100 (1.3 skip-first was 757/1022, 3.53% — different ruler, not a tiny gain). Local medium CER **0.67% → 0.26%** (`ClsResizeImg` keep-aspect, thin Latin lines no longer flip 0/180); tiny / small are unchanged on the same set.
+CI tiny is **767/1032**, CER **2.36%** on the full 100 (cls 1020/1020; 1.3 skip-first was 757/1022, 3.53% — different ruler, not a tiny gain). Local exact_lines stay 742 / 950 / 1004; CER is **2.78% → 2.37%**, **0.60% → 0.41%**, **0.67% → 0.14%** (left 4:1 CLS, inverted long lines rotate before REC).
 
 Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
 

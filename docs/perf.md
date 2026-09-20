@@ -3,7 +3,7 @@
 ## 怎么读
 
 - **墙钟**：去掉首张 warmup 后的 **median ms/图**（`--warmup 1`）。本机 5800X 表额外报 mean，和 median 几乎重合。
-- **准确率、Δ WS**：初始化后满勤（100 张 / smoke 20 张），**不再跳过首张**。CI tiny bench 是 **766/1032、CER 3.22%**；本机 5800X 是 **742/1036、2.78%**。两边都是 `windows` 生成机、字体齐，但是各自出的图，行数就是 **1032** 和 **1036**，不要对绝对 exact。1.3 CI 仍是跳过首张的 **757/1022、3.53%**；和 766/1032 对不上涨幅（99 张 vs 100 张，行精确 74.1% vs 74.2%）。质量变化看本机同尺子：tiny / small 没动，medium CER **0.67% → 0.26%**（`1c06dee` CLS keep-aspect）。
+- **准确率、Δ WS**：初始化后满勤（100 张 / smoke 20 张），**不再跳过首张**。CI tiny bench 是 **767/1032、CER 2.36%**（cls 1020/1020）；本机 5800X 是 **742/1036、2.37%**。两边都是 `windows` 生成机、字体齐，但是各自出的图，行数就是 **1032** 和 **1036**，不要对绝对 exact。1.3 CI 仍是跳过首张的 **757/1022、3.53%**；和 767/1032 对不上涨幅（99 张 vs 100 张）。质量变化看本机同尺子：行精确没动，CER 因左 1:4 CLS 下降（tiny 2.78% → **2.37%**，small 0.60% → **0.41%**，medium 0.67% → **0.14%**）。
 - **replica**：每台 GitHub-hosted VM 一份。先在单 replica 内算比值，再只汇总 **同一 CPU**。
 - GitHub `windows-2025` 会随机分到 EPYC 7763 / 9V74 / Xeon。**7763 没有 AVX-512**；9V74 / Xeon 有时走 AVX-512。这两类绝对时间不可比。
 - 4 worker 下算子会并行重叠，**之和可以大于墙钟**，只适合看结构。
@@ -22,13 +22,13 @@
 | net10 AdvSIMD（linux-arm64 / osx-arm64）    | NCHW                   | **手写 NHWC NEON tile**                                                            |
 | 公开 `InferenceSession.Run`                 | 逻辑 NCHW              | 仍收逻辑 NCHW；图输入已标 NHWC 时入口自动转置                                      |
 | 像素格式                                    | 只认紧排 BGR           | 默认仍 `Bgr24`；RGB24 / BGRA32 / RGBA32 在 resize / warp 就地 gather，不摊中间 BGR |
-| CLS 预处理                                  | PaddleX 拉伸 160×80 + ImageNet RGB | PaddleOCR `ClsResizeImg` 保比例、右侧 pad `-1`、REC 归一化 BGR（细长拉丁行不再被拉扁后 0/180 翻面） |
+| CLS 预处理                                  | PaddleX 拉伸 160×80 + ImageNet RGB | `ClsResizeImg` 保比例 + RecNorm BGR；宽高比 >4:1 只采左边 4×height（整行挤进 160 对 0/180 没意义） |
 
 `PPOCR_NHWC=0` 仍可整图关回 NCHW。CI 不再跑 OpenVINO.NET。像素格式不增加整图缓冲：gather 写的是已经要做的双线性 / cubic scratch。
 
 结论（细节在后面两节）：
 
-- **正确率**：CI tiny bench sharp **766/1032、CER 3.22%**（各 ISA / ns2 / scalar 相同）；c **764/1032、4.25%**。相对 1.3 的 757/1022、3.53% 是满勤口径，不能当 CI tiny 涨了。本机 tiny / small 逐项相同；medium exact 1002 → **1004**、CER **0.67% → 0.26%**，这是 `1c06dee` CLS keep-aspect。
+- **正确率**：CI tiny bench sharp **767/1032、CER 2.36%**（cls 1020/1020；各 ISA / ns2 / scalar 相同）；c **764/1032、3.03%**（cls 998/1019）。相对 1.3 的 757/1022、3.53% 是满勤口径，不能当 CI tiny 涨了。本机行精确没动（742 / 950 / 1004）；CER 因左 1:4 CLS 下降（2.78% → **2.37%**，0.60% → **0.41%**，0.67% → **0.14%**）。
 - **墙钟**：CI 上收益在 ns2 / noavx / scalar / ARM AdvSIMD；x64 AVX2 默认路径和 1.3 持平（噪声）。本机 tiny net10 **0.73×**，ns2 三个模型 **0.48–0.70×**。
 - **内存**：tiny-4w 工作集峰值大约少 **300 MB**（7763 817→515，N2 840→572）。主要是 NHWC workspace 别名，以及预处理直写 NHWC、不再为输入 `LayoutConvert` 留第二份缓冲。
 
@@ -47,7 +47,7 @@ win-x64 SIMD 先丢一次 25 张 tiny-4w 烤 VM（不上传），再跑默认 / 
 
 数据集、模型、预解码 BGR、ISA 开关、runner：`.github/workflows/test.yml`，`dataset/` 固定种子合成 100 张 JPG。库 TFM 默认 `net10.0`；`tiny-4w-ns2` 把库编成 `netstandard2.0`，仍跑在 .NET 10 上。
 
-正确率（100 张满勤）：sharp **766/1032、CER 3.22%**（含 scalar、ns2、全部 ISA）；c **764/1032、4.25%**。smoke 20 张满勤：tiny **160/218**，small **198/218**，medium **210/218**。
+正确率（100 张满勤）：sharp **767/1032、CER 2.36%**（cls 1020/1020；含 scalar、ns2、全部 ISA）；c **764/1032、3.03%**（cls 998/1019）。smoke 20 张满勤：tiny **160/218**（CER 1.90%），small **198/218**（0.40%），medium **210/218**（0.13%）。
 
 ### linux-arm64 N2（最稳，6 replica）
 
@@ -142,21 +142,21 @@ x64 / ARM64 本库 peak 大约少 **300 MB**。c 仍然略省，但更慢。Open
 
 ## 本机 5800X
 
-发布前复测（`97c1448`，2026-09-19）：HOME-MAIN，Ryzen 7 5800X / 16 逻辑核 / 64 GB / AVX2（无 AVX-512），`.NET 10.0.11`。1.4 走当前树；1.3 走 NuGet `Sdcb.SimdPaddleOCR` 1.3.0。同一 `dataset/`，先 25 张 tiny 烤机，再各 100 张 `--warmup 1`。墙钟 n=99；准确率与 Δ WS 满勤 **1036** 行。箭头均为 **1.3 → 1.4**。不要用这里的绝对毫秒卡 GitHub runner。
+发布前复测（墙钟/内存 `97c1448`，2026-09-19；CER `68a009a` 左 1:4 同机复测）：HOME-MAIN，Ryzen 7 5800X / 16 逻辑核 / 64 GB / AVX2（无 AVX-512），`.NET 10.0.11`。1.4 走当前树；1.3 走 NuGet `Sdcb.SimdPaddleOCR` 1.3.0。同一 `dataset/`，先 25 张 tiny 烤机，再各 100 张 `--warmup 1`。墙钟 n=99；准确率与 Δ WS 满勤 **1036** 行。箭头均为 **1.3 → 1.4**。不要用这里的绝对毫秒卡 GitHub runner。
 
 | 模型   | 引擎            |                mean |         loaded |              peak |            Δ WS |     exact_lines |           CER |
 | ------ | --------------- | ------------------: | -------------: | ----------------: | --------------: | --------------: | ------------: |
-| tiny   | 本库 net10 AVX2 |  86.0 → **63.1**（0.73×） | 415 → 401 MB | 804 → **515 MB** | 389 → **113 MB** |        742/1036 |         2.78% |
-| tiny   | 本库 ns2        | 203.1 → **96.5**（0.48×） | 417 → 404 MB | 766 → 522 MB | 342 → 117 MB |        742/1036 |         2.78% |
-| small  | 本库 net10 AVX2 | 222.1 → **200.0**（0.90×） | 512 → 452 MB | 1195 → **674 MB** | 677 → **217 MB** |        950/1036 |         0.60% |
-| small  | 本库 ns2        | 432.1 → **303.0**（0.70×） | 525 → 461 MB | 1277 → 684 MB | 751 → 218 MB |        950/1036 |         0.60% |
-| medium | 本库 net10 AVX2 |   628 → **585**（0.93×） | 959 → 699 MB | 2489 → **1206 MB** | 1528 → **505 MB** | 1002 → **1004**/1036 | 0.67% → **0.26%** |
-| medium | 本库 ns2        |  1606 → **874**（0.54×） | 986 → 726 MB | 2663 → 1218 MB | 1677 → 490 MB | 1002 → **1004**/1036 | 0.67% → **0.26%** |
+| tiny   | 本库 net10 AVX2 |  86.0 → **63.1**（0.73×） | 415 → 401 MB | 804 → **515 MB** | 389 → **113 MB** |        742/1036 | 2.78% → **2.37%** |
+| tiny   | 本库 ns2        | 203.1 → **96.5**（0.48×） | 417 → 404 MB | 766 → 522 MB | 342 → 117 MB |        742/1036 | 2.78% → **2.37%** |
+| small  | 本库 net10 AVX2 | 222.1 → **200.0**（0.90×） | 512 → 452 MB | 1195 → **674 MB** | 677 → **217 MB** |        950/1036 | 0.60% → **0.41%** |
+| small  | 本库 ns2        | 432.1 → **303.0**（0.70×） | 525 → 461 MB | 1277 → 684 MB | 751 → 218 MB |        950/1036 | 0.60% → **0.41%** |
+| medium | 本库 net10 AVX2 |   628 → **585**（0.93×） | 959 → 699 MB | 2489 → **1206 MB** | 1528 → **505 MB** | 1002 → **1004**/1036 | 0.67% → **0.14%** |
+| medium | 本库 ns2        |  1606 → **874**（0.54×） | 986 → 726 MB | 2663 → 1218 MB | 1677 → 490 MB | 1002 → **1004**/1036 | 0.67% → **0.14%** |
 
 - net10：**tiny 0.73×**（预处理直写 NHWC），small / medium **0.90× / 0.93×**，墙钟接近，收益主要在内存。
 - **ns2 是本机最大墙钟收益**（1.3 仍是 NCHW `Vector`）：tiny **0.48×**、small **0.70×**、medium **0.54×**。1.4 的 ns2 / net10 收成 **1.50–1.53×**。
 - **工作集大约腰斩**：tiny peak 804 → **515 MB**（和 7763 CI 同一把尺子），Δ WS 389 → 113；medium peak 2489 → **1206**。loaded 两边接近，差在跑图 Δ WS。
-- tiny / small 行精确与 CER 在 1.3 / 1.4、net10 / ns2 之间相同。medium CER 下降和 `1c06dee`（ClsResizeImg keep-aspect）同方向。
+- 行精确在 1.3 / 1.4、net10 / ns2 之间相同（tiny / small 没动；medium 1002 → **1004** 是更早的 `ClsResizeImg`）。CER 再降一截是左 1:4 CLS：倒长行会先转正再进 REC。ns2 与 net10 共用 `Cls()`，CER 不必另测。
 
 1.4 JSON：`bench-out/local-5800x-{tiny,small,medium}-4w.json`、`bench-out/local-5800x-ns2-{tiny,small,medium}-4w.json`。1.3：`bench-out/local-5800x-v13-{net10,ns2}-{tiny,small,medium}-4w.json`。
 
@@ -178,9 +178,10 @@ JSON：`bench-out/local-5800x-c-{tiny,small,medium}-4w.json`。
 | ---------- | ----------------------------------------------------------------------------- | --------- | --------------------------------------------- |
 | **1.3.0**  | [34818949921](https://github.com/sdcb/SimdPaddleOCR/actions/runs/34818949921) | `37fe1fd` | 只 AVX2 NHWC；ns2 / ARM / scalar 仍 NCHW      |
 | **1.4**    | [35241030966](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35241030966) | `b784d28` | 全路径 NHWC + 像素格式；下文 7763 / N2 **墙钟**默认指这次 |
-| 1.4 复核   | [35361330684](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35361330684) | `97c1448` | 准确率改满勤 100 张（766/1032）；墙钟与 1.3 比意思不变。SIMD 7763 只有 1 份，不重写中位表 |
+| 1.4 复核   | [35361330684](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35361330684) | `97c1448` | 准确率改满勤 100 张（当时 766/1032）；墙钟与 1.3 比意思不变。SIMD 7763 只有 1 份，不重写中位表 |
 | 1.4 前一次 | [35217602432](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35217602432) | `67cf1fa` | 内核已是 1.4；用来给 win-x64 7763 补样本      |
-| 本机 5800X | —                                                                             | `97c1448` | 发布前同机；1.3 用 NuGet 1.3.0，1.4 用当前树  |
+| 1.4 CLS 左 1:4 | [35513018083](https://github.com/sdcb/SimdPaddleOCR/actions/runs/35513018083) | `68a009a` | 准度：sharp **767/1032、CER 2.36%**；c **764/1032、3.03%**。墙钟中位表不重写 |
+| 本机 5800X | —                                                                             | `97c1448` / `68a009a` | 墙钟/内存 `97c1448`；CER 左 1:4 后同机复测 |
 
 推送或手动触发 [`.github/workflows/test.yml`](../.github/workflows/test.yml)，下载 `perf-report` artifact。本地同一套数据：
 
