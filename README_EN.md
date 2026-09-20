@@ -2,9 +2,8 @@
 
 [中文](README.md) | **English**
 
-Pure C# PP-OCRv6 inference library: multi-platform SIMD, low memory use, and high accuracy.
+Pure C# PP-OCRv6 inference library: cross-platform hand-written kernels and GEMM, very high performance, low memory requirements, and very high accuracy.
 It ships a managed ONNX interpreter and does not depend on Paddle Inference, ONNX Runtime, or OpenCV native libraries.
-1.4 extends graph-level NHWC to ns2, x64 scalar, and net10 AdvSIMD, with lower memory use and more stable 0/180 on long lines.
 
 The core API accepts interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 are also first-class). It does not decode images, so ImageSharp, SkiaSharp, or OpenCvSharp are not required.
 
@@ -201,13 +200,13 @@ respective owners. This project is not official and does not imply endorsement.
 
 ## Performance
 
-**1.4** vs **1.3.0**: graph-level NHWC now covers ns2 / x64 scalar / net10 AdvSIMD, and preprocess writes NHWC directly.
+**1.4.2** vs **1.3.0**: graph-level NHWC now covers ns2 / x64 scalar / net10 AdvSIMD, and preprocess writes NHWC directly.
 **Memory dropped sharply**: tiny-4w working-set peak is about **300 MB** lower (win-x64 817→**515 MB**, linux-arm64 840→**572 MB**); Δ WS fell from ~400 MB to ~100–160 MB.
 CI tiny is **767/1032**, CER **2.36%** on the full 100 (cls 1020/1020; 1.3 skip-first was 757/1022, 3.53% — different ruler, not a tiny gain). Local exact_lines stay 742 / 950 / 1004; CER is **2.78% → 2.37%**, **0.60% → 0.41%**, **0.67% → 0.14%** (left 4:1 CLS, inverted long lines rotate before REC).
 
 Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
 
-| Path | 1.3 | 1.4 | vs 1.3 | WS peak |
+| Path | 1.3 | 1.4.2 | vs 1.3 | WS peak |
 | --- | ---: | ---: | ---: | ---: |
 | linux-arm64 N2 `tiny-4w` (net10 AdvSIMD) | 241 | **180** | **0.75×** | 840 → **572 MB** |
 | linux-arm64 `tiny-4w-ns2` | 374 | **295** | **0.79×** | |
@@ -217,7 +216,7 @@ Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image 
 | win-x64 7763 `tiny-4w-noavx` | 481 | **380** | **0.79×** | |
 | win-x64 7763 `tiny-4w-scalar` | 1368 | **1220** | **0.89×** | |
 
-Local Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images (n=99), this library mean (1.3 NuGet → 1.4): tiny **86.0 → 63.1 ms** (0.73×), small **222 → 200 ms** (0.90×), medium **628 → 585 ms** (0.93×). Same machine ns2: tiny **203 → 96.5 ms** (0.48×), small **432 → 303 ms** (0.70×), medium **1606 → 874 ms** (0.54×).
+Local Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images (n=99), this library mean (1.3 NuGet → 1.4.2): tiny **86.0 → 63.1 ms** (0.73×), small **222 → 200 ms** (0.90×), medium **628 → 585 ms** (0.93×). Same machine ns2: tiny **203 → 96.5 ms** (0.48×), small **432 → 303 ms** (0.70×), medium **1606 → 874 ms** (0.54×).
 Same-machine C engine and per-ISA ratios: [`docs/perf.md`](docs/perf.md).
 
 ## Reproducing performance

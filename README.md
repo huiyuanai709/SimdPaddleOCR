@@ -2,9 +2,8 @@
 
 **中文** | [English](README_EN.md)
 
-纯 C# PP-OCRv6 推理库：多平台 SIMD 优化、内存占用低、高正确率。
+纯 C# PP-OCRv6 推理库：多平台手写 Kernel / GEMM 等算子、超高性能、低内存需求、超高准确率。
 自带托管 ONNX 解释器，不依赖 Paddle Inference、ONNX Runtime 或 OpenCV 原生库。
-1.4 把图级 NHWC 扩到 ns2、x64 scalar 和 net10 AdvSIMD，内存占用更低，长行 0/180 更稳。
 
 核心 API 接收交错像素内存（默认 BGR24，也可直接传 RGB24 / BGRA32 / RGBA32），不负责图片解码，因此不会强制引入 ImageSharp、SkiaSharp 或 OpenCvSharp。
 
@@ -201,13 +200,13 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 
 ## 性能
 
-**1.4** 相对 **1.3.0**：图级 NHWC 从仅 AVX2 扩到 ns2 / x64 scalar / net10 AdvSIMD，预处理直接写 NHWC。
+**1.4.2** 相对 **1.3.0**：图级 NHWC 从仅 AVX2 扩到 ns2 / x64 scalar / net10 AdvSIMD，预处理直接写 NHWC。
 **内存占用大幅下降**：tiny-4w 工作集峰值大约少 **300 MB**（win-x64 817→**515 MB**，linux-arm64 840→**572 MB**），Δ WS 从约 400 MB 降到约 100–160 MB。
 CI tiny 满勤 **767/1032**、CER **2.36%**（cls 1020/1020；1.3 跳过首张是 757/1022、3.53%，尺子不同，不能当涨幅）。本机行精确仍是 742 / 950 / 1004；CER **2.78% → 2.37%**、**0.60% → 0.41%**、**0.67% → 0.14%**（左 1:4 CLS，倒长行先转正再进 REC）。
 
 GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 
-| 路径                                      |     1.3 |      1.4 |         相对 |       工作集峰值 |
+| 路径                                      |     1.3 |    1.4.2 |         相对 |       工作集峰值 |
 | ----------------------------------------- | ------: | -------: | -----------: | ---------------: |
 | linux-arm64 N2 `tiny-4w`（net10 AdvSIMD） |     241 |  **180** |    **0.75×** | 840 → **572 MB** |
 | linux-arm64 `tiny-4w-ns2`                 |     374 |  **295** |    **0.79×** |                  |
@@ -217,7 +216,7 @@ GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 | win-x64 7763 `tiny-4w-noavx`              |     481 |  **380** |    **0.79×** |                  |
 | win-x64 7763 `tiny-4w-scalar`             |    1368 | **1220** |    **0.89×** |                  |
 
-本机 Ryzen 7 5800X、4 worker、仓库 `dataset/` 100 张（n=99）本库 mean（1.3 NuGet → 1.4）：tiny **86.0 → 63.1 ms**（0.73×），small **222 → 200 ms**（0.90×），medium **628 → 585 ms**（0.93×）。同机 ns2：tiny **203 → 96.5 ms**（0.48×），small **432 → 303 ms**（0.70×），medium **1606 → 874 ms**（0.54×）。
+本机 Ryzen 7 5800X、4 worker、仓库 `dataset/` 100 张（n=99）本库 mean（1.3 NuGet → 1.4.2）：tiny **86.0 → 63.1 ms**（0.73×），small **222 → 200 ms**（0.90×），medium **628 → 585 ms**（0.93×）。同机 ns2：tiny **203 → 96.5 ms**（0.48×），small **432 → 303 ms**（0.70×），medium **1606 → 874 ms**（0.54×）。
 同机 C 引擎与各 ISA 比值见 [`docs/perf.md`](docs/perf.md)。
 
 ## 性能复现
