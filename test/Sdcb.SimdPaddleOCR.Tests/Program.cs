@@ -125,6 +125,7 @@ Console.WriteLine(engine.LoadedMessage(wsLoaded));
 // VM heater in CI is separate: each case is a new process.
 int warmupCount = Math.Min(warmupImages, Math.Max(0, decoded.Length - 1));
 List<BenchmarkRow> rows = [];
+List<float[][]> rowBoxes = [];
 for (int index = 0; index < decoded.Length; index++)
 {
     var d = decoded[index];
@@ -151,6 +152,7 @@ for (int index = 0; index < decoded.Length; index++)
         Rotations = result.Rotations,
         WorkingSetMb = ws,
     });
+    rowBoxes.Add(result.Boxes);
     string det = result.StageMs is { } stages && stages.TryGetValue("det_graph", out double detMs)
         ? $" det={detMs:F2}" : "";
     Console.WriteLine($"{index + 1}/{decoded.Length} {d.Name} total={sw.Elapsed.TotalMilliseconds:F3}{det} lines={result.Texts.Length} ws={ws:F1}MB");
@@ -233,12 +235,12 @@ meta["framework"] = RuntimeInformation.FrameworkDescription;
 meta["libraryTfm"] = typeof(PaddleOcrAll).Assembly
     .GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName;
 
-JsonObject doc = BenchSummary.WrapWithMeta(rows, meta);
 BenchmarkAccuracy? accuracy = hasMetadata
-    ? BenchSummary.ComputeAccuracy(doc["rows"]!.AsArray(), metadataPath)
+    ? BenchSummary.ComputeAccuracy(rows, metadataPath, rowBoxes)
     : null;
 if (accuracy is not null)
     meta["accuracy"] = BenchSummary.AccuracyNode(accuracy);
+JsonObject doc = BenchSummary.WrapWithMeta(rows, meta);
 
 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
 File.WriteAllText(outPath, doc.ToJsonString(new JsonSerializerOptions

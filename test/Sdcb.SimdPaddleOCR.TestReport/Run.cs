@@ -31,6 +31,8 @@ sealed class Run
     public double Throughput => Mean > 0 ? 1000.0 / Mean : 0;
     public int? ExactLines { get; init; }
     public int? TotalLines { get; init; }
+    public int? ClsCorrect { get; init; }
+    public int? ClsTotal { get; init; }
     public int? ExactImages { get; init; }
     public int? Images { get; init; }
     public double? Cer { get; init; }
@@ -146,6 +148,7 @@ sealed class Run
         if (replica > 1) label += $" r{replica}";
 
         int? exactLines = null, totalLines = null, exactImg = null, images = null;
+        int? clsCorrect = null, clsTotal = null;
         double? cer = null, charAcc = null;
         if (meta?["accuracy"] is JsonObject a)
         {
@@ -155,6 +158,8 @@ sealed class Run
             images = a["images"]?.GetValue<int>();
             cer = a["cer"]?.GetValue<double>();
             charAcc = a["char_acc"]?.GetValue<double>();
+            clsCorrect = a["cls_correct"]?.GetValue<int>();
+            clsTotal = a["cls_total"]?.GetValue<int>();
         }
 
         double? wsLoaded = Mb(meta?["working_set_mb_loaded"]);
@@ -190,6 +195,8 @@ sealed class Run
             P95 = p95,
             ExactLines = exactLines,
             TotalLines = totalLines,
+            ClsCorrect = clsCorrect,
+            ClsTotal = clsTotal,
             ExactImages = exactImg,
             Images = images,
             Cer = cer,

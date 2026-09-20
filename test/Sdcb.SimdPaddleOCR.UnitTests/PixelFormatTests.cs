@@ -23,6 +23,79 @@ public class PixelFormatTests
     }
 
     [Fact]
+    public void ClsPreprocess_LongLine_FourFormats_MatchBgr24()
+    {
+        (int width, int height, byte[] bgr) = MakeBgr(120, 20);
+        CompareCls(bgr, width, height, ToRgb24(bgr), ImagePixelFormat.Rgb24, width * 3);
+        CompareCls(bgr, width, height, To32(bgr, rgba: false), ImagePixelFormat.Bgra32, width * 4);
+        CompareCls(bgr, width, height, To32(bgr, rgba: true), ImagePixelFormat.Rgba32, width * 4);
+    }
+
+    [Fact]
+    public void Cls_LongLine_IgnoresPixelsPastLeft4to1Window()
+    {
+        const int width = 120, height = 20;
+        (int w, int h, byte[] left) = MakeBgr(width, height);
+        byte[] painted = (byte[])left.Clone();
+        int cap = 4 * height;
+        for (int y = 0; y < h; y++)
+            for (int x = cap; x < w; x++)
+            {
+                int o = (y * w + x) * 3;
+                painted[o] = 255;
+                painted[o + 1] = 0;
+                painted[o + 2] = 128;
+            }
+
+        float[] a = new float[3 * 80 * 160];
+        float[] b = new float[a.Length];
+        Assert.Equal(160, PPOCRPreprocess.Cls(left, w, h, w * 3, a));
+        Assert.Equal(160, PPOCRPreprocess.Cls(painted, w, h, w * 3, b));
+        Assert.Equal(a, b);
+    }
+
+    [Fact]
+    public void Cls_LongLine_MatchesPackedLeftWindow()
+    {
+        const int width = 120, height = 20;
+        (_, _, byte[] full) = MakeBgr(width, height);
+        int cap = 4 * height;
+        byte[] packed = new byte[cap * height * 3];
+        for (int y = 0; y < height; y++)
+            full.AsSpan(y * width * 3, cap * 3).CopyTo(packed.AsSpan(y * cap * 3));
+
+        float[] fromFull = new float[3 * 80 * 160];
+        float[] fromPacked = new float[fromFull.Length];
+        Assert.Equal(
+            PPOCRPreprocess.Cls(full, width, height, width * 3, fromFull),
+            PPOCRPreprocess.Cls(packed, cap, height, cap * 3, fromPacked));
+        Assert.Equal(fromFull, fromPacked);
+    }
+
+    [Fact]
+    public void Cls_ShortLine_UsesFullWidth()
+    {
+        const int width = 30, height = 20;
+        (_, _, byte[] original) = MakeBgr(width, height);
+        byte[] painted = (byte[])original.Clone();
+        for (int y = 0; y < height; y++)
+        {
+            int o = (y * width + width - 1) * 3;
+            painted[o] = 255;
+            painted[o + 1] = 255;
+            painted[o + 2] = 255;
+        }
+
+        float[] a = new float[3 * 80 * 160];
+        float[] b = new float[a.Length];
+        int wa = PPOCRPreprocess.Cls(original, width, height, width * 3, a);
+        int wb = PPOCRPreprocess.Cls(painted, width, height, width * 3, b);
+        Assert.Equal(wa, wb);
+        Assert.True(wa < 160);
+        Assert.NotEqual(a, b);
+    }
+
+    [Fact]
     public void RecPreprocess_FourFormats_MatchBgr24()
     {
         (int width, int height, byte[] bgr) = MakeBgr(53, 17);

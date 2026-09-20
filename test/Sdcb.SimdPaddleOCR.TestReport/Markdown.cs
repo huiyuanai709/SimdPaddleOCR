@@ -25,8 +25,8 @@ static class Markdown
         sb.AppendLine($"## {title}");
         sb.AppendLine();
         if (runs.Count == 0) { sb.AppendLine("No matching runs."); sb.AppendLine(); return; }
-        sb.AppendLine("| RID | case | engine | model | n | effective ISA | median ms | P95 ms | vs replica baseline | exact_lines | CER | WS peak | Δ WS | CPU |");
-        sb.AppendLine("| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |");
+        sb.AppendLine("| RID | case | engine | model | n | effective ISA | median ms | P95 ms | vs replica baseline | cls | exact_lines | CER | WS peak | Δ WS | CPU |");
+        sb.AppendLine("| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- |");
         foreach (Run r in runs.OrderBy(r => r.Rid).ThenBy(r => r.CaseId).ThenBy(r => r.Label))
         {
             List<Run> peers = runs.Where(x =>
@@ -40,7 +40,7 @@ static class Markdown
                 if (baseline is not null && baseline.Mean > 0)
                     ratio = (r.Mean / baseline.Mean).ToString("F2", CultureInfo.InvariantCulture);
             }
-            sb.AppendLine($"| {Cell(r.Rid)} | {Cell(string.IsNullOrEmpty(r.CaseId) ? r.Label : r.CaseId)} | {Cell(r.Engine)} | {Cell(r.Model)} | {r.N} | {Cell(r.EffectiveIsa)} | {r.Median:F1} | {r.P95:F1} | {ratio} | {Frac(r.ExactLines, r.TotalLines)} | {Pct(r.Cer)} | {Mb(r.WsPeak)} | {Mb(WorkingSetDelta(r))} | {Cell(r.CpuName)} |");
+            sb.AppendLine($"| {Cell(r.Rid)} | {Cell(string.IsNullOrEmpty(r.CaseId) ? r.Label : r.CaseId)} | {Cell(r.Engine)} | {Cell(r.Model)} | {r.N} | {Cell(r.EffectiveIsa)} | {r.Median:F1} | {r.P95:F1} | {ratio} | {Frac(r.ClsCorrect, r.ClsTotal)} | {Frac(r.ExactLines, r.TotalLines)} | {Pct(r.Cer)} | {Mb(r.WsPeak)} | {Mb(WorkingSetDelta(r))} | {Cell(r.CpuName)} |");
         }
         sb.AppendLine();
     }
@@ -59,14 +59,14 @@ static class Markdown
             sb.AppendLine();
             sb.AppendLine("All cases in a replica run on the same machine. Ratios are calculated within each replica; absolute values from different CPUs are not pooled.");
             sb.AppendLine();
-            sb.AppendLine("| replica | case | engine | model | n | effective ISA | median ms | P95 ms | vs replica baseline | exact_lines | CER | WS peak | Δ WS | CPU |");
-            sb.AppendLine("| ---: | --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |");
+            sb.AppendLine("| replica | case | engine | model | n | effective ISA | median ms | P95 ms | vs replica baseline | cls | exact_lines | CER | WS peak | Δ WS | CPU |");
+            sb.AppendLine("| ---: | --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | --- |");
             foreach (Run r in group.OrderBy(r => r.Replica).ThenBy(r => r.CaseId).ThenBy(r => r.Label))
             {
                 Run? baseline = Baseline(group, r.Replica);
                 string ratio = baseline is not null && baseline.Mean > 0
                     ? (r.Mean / baseline.Mean).ToString("F2", CultureInfo.InvariantCulture) : "—";
-                sb.AppendLine($"| {r.Replica} | {Cell(string.IsNullOrEmpty(r.CaseId) ? r.Label : r.CaseId)} | {Cell(r.Engine)} | {Cell(r.Model)} | {r.N} | {Cell(r.EffectiveIsa)} | {r.Median:F1} | {r.P95:F1} | {ratio} | {Frac(r.ExactLines, r.TotalLines)} | {Pct(r.Cer)} | {Mb(r.WsPeak)} | {Mb(WorkingSetDelta(r))} | {Cell(r.CpuName)} |");
+                sb.AppendLine($"| {r.Replica} | {Cell(string.IsNullOrEmpty(r.CaseId) ? r.Label : r.CaseId)} | {Cell(r.Engine)} | {Cell(r.Model)} | {r.N} | {Cell(r.EffectiveIsa)} | {r.Median:F1} | {r.P95:F1} | {ratio} | {Frac(r.ClsCorrect, r.ClsTotal)} | {Frac(r.ExactLines, r.TotalLines)} | {Pct(r.Cer)} | {Mb(r.WsPeak)} | {Mb(WorkingSetDelta(r))} | {Cell(r.CpuName)} |");
             }
             sb.AppendLine();
             foreach (IGrouping<string, Run> caseGroup in group.GroupBy(r => r.CaseId.Length == 0 ? r.Label : r.CaseId))

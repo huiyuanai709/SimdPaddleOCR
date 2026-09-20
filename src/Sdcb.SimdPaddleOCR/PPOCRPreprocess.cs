@@ -281,19 +281,33 @@ internal static class PPOCRPreprocess
         ValidateSource(source, sourceWidth, sourceHeight, sourceStride, format);
         const int height = 80, width = 160;
         if (output.Length != 3 * height * width) throw new ArgumentException("Invalid CLS output size.");
-        // PP-LCNet_x0_25_textline_ori is a PaddleX classifier: the model card
-        // pipeline is ResizeImage([160, 80]) (stretch) then ImageNet on RGB,
-        // which is what we would match if we followed PaddleX literally.
-        // Stretching a thin Latin crop into 160×80 flips 0/180 in practice.
-        // The older PaddleOCR ClsResizeImg form — keep aspect (height 80,
-        // width min(160, ceil(80*w/h))), pad unused columns with -1, BGR,
-        // (x/255-0.5)/0.5 — does not. Why the PaddleX stretch loses here is
-        // unclear. Same OpenCV INTER_LINEAR + RecNormalized write as REC, so
-        // RGB/RGBA/padded stride stay bit-identical to BGR.
+        // Historical recipes we no longer run:
+        // - PaddleX (this library 1.3): stretch the whole line to fill
+        //   160×80 (no keep-aspect), gather as RGB, ImageNet
+        //   (x/255-mean)/std with mean 0.485/0.456/0.406 and
+        //   std 0.229/0.224/0.225 (same LUT as DET). Short lines are
+        //   stretched; long lines are flattened.
+        // - PaddleOCR ClsResizeImg (1.4): keep-aspect the whole line (height 80,
+        //   width min(160, ceil(80*w/h))), pad unused columns with -1, BGR
+        //   RecNorm (x/255-0.5)/0.5. Long lines are squeezed into 160 px and
+        //   that costs 0/180 accuracy.
+        // Current (1.4.2+): same keep-aspect + RecNorm write as ClsResizeImg
+        // (so RGB/RGBA/padded stride stay bit-identical to BGR), but a DET
+        // line wider than 4:1 is sampled from the left 4×height window only.
+        // Squeezing a long crop into 160 px flattens glyphs until 0/180 is
+        // noise; a left 2:1 window was too short on inverted Latin tails.
+        // 4:1 is the accuracy vs simplicity tradeoff that held up. The
+        // window is a smaller sourceWidth on the original buffer — stride
+        // is unchanged, no crop allocation. INTER_LINEAR is output-sized;
+        // a wider window only changes the 160 source taps, not the number
+        // of output pixels.
+        int windowWidth = sourceWidth;
+        if ((long)height * sourceWidth > (long)(width * 2) * sourceHeight)
+            windowWidth = (int)((long)(width * 2) * sourceHeight / height);
         int actualWidth = (int)Math.Min(width,
-            ((long)height * sourceWidth + sourceHeight - 1L) / sourceHeight);
-        output.Fill(-1f);
-        ResizeBgrInterLinearToNchw(source, sourceWidth, sourceHeight, sourceStride,
+            ((long)height * windowWidth + sourceHeight - 1L) / sourceHeight);
+        if (actualWidth < width) output.Fill(-1f);
+        ResizeBgrInterLinearToNchw(source, windowWidth, sourceHeight, sourceStride,
             actualWidth, height, width, output, workspace, nhwc, format);
         return actualWidth;
     }

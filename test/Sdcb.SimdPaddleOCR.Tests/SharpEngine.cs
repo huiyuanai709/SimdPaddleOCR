@@ -76,6 +76,8 @@ sealed class SharpEngine : IBenchEngine
             Detected = result.DetectedCount,
             Texts = result.Lines.Select(x => x.Text).ToArray(),
             Rotations = result.Lines.Select(x => x.AppliedRotationDegrees).ToArray(),
+            Boxes = result.Lines.Select(x => BenchBoxes.Aabb(x.Box.X1, x.Box.Y1, x.Box.X2, x.Box.Y2,
+                x.Box.X3, x.Box.Y3, x.Box.X4, x.Box.Y4)).ToArray(),
             Hash = $"{result.PackedTextHash:x16}",
             StageMs = stageMs,
             StageCalls = stageCalls,

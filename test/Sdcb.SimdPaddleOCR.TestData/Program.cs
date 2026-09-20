@@ -442,6 +442,7 @@ Parallel.For(0, 100, new ParallelOptions { MaxDegreeOfParallelism = Environment.
             ["natural_width_at_height_48"] = CeilToInt(bw * 48.0 / bh),
             ["angle_degrees"] = 0.0,
             ["orientation_degrees"] = 0,
+            ["cls_degrees"] = 0,
             ["font"] = fontPath,
             ["font_size"] = 28,
             ["color_rgb"] = new JsonArray((int)ink.r, (int)ink.g, (int)ink.b),
@@ -528,6 +529,23 @@ static string[] DiscoverExtraFonts()
 static byte Clamp8(int v) => (byte)Math.Clamp(v, 0, 255);
 static int CeilToInt(double v) => (int)Math.Ceiling(v);
 
+static int ClsDegreesFromDraw(double lineRotation)
+{
+    // World-space draw rotation → expected CLS 0/180 after DET unwarp.
+    // Tall crops are then rotated 90° CW: +90 (top-to-bottom) lands first
+    // char on the right (180); -90 lands LTR (0). Horizontal is 1:1.
+    int ori = (int)Math.Round(lineRotation);
+    return ori switch
+    {
+        0 => 0,
+        180 or -180 => 180,
+        90 => 180,
+        -90 or 270 => 0,
+        _ => throw new ArgumentOutOfRangeException(nameof(lineRotation), lineRotation,
+            "orientation must be 0, 90, -90, or 180."),
+    };
+}
+
 static JsonObject LineJson(string text, int x, int y, int rw, int rh, int naturalWidth48,
     double angle, double lineRotation, string fontPath, int size, SKColor color) => new()
 {
@@ -536,6 +554,7 @@ static JsonObject LineJson(string text, int x, int y, int rw, int rh, int natura
     ["natural_width_at_height_48"] = naturalWidth48,
     ["angle_degrees"] = Math.Round(angle, 3),
     ["orientation_degrees"] = Math.Round(lineRotation, 3),
+    ["cls_degrees"] = ClsDegreesFromDraw(lineRotation),
     ["font"] = fontPath,
     ["font_size"] = size,
     ["color_rgb"] = new JsonArray((int)color.Red, (int)color.Green, (int)color.Blue),

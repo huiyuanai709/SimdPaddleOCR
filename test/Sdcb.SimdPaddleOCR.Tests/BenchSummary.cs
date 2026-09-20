@@ -49,7 +49,9 @@ sealed record BenchmarkAccuracy(
     int ExactImages,
     int Images,
     long Errors,
-    long TotalChars)
+    long TotalChars,
+    int? ClsCorrect = null,
+    int? ClsTotal = null)
 {
     public double Cer => TotalChars > 0 ? (double)Errors / TotalChars : 0;
     public double CharacterAccuracy => 1 - Cer;
@@ -188,17 +190,26 @@ static class BenchSummary
         foreach (string k in rest.OrderBy(k => k)) yield return k;
     }
 
-    public static JsonObject AccuracyNode(BenchmarkAccuracy accuracy) => new()
+    public static JsonObject AccuracyNode(BenchmarkAccuracy accuracy)
     {
-        ["exact_lines"] = accuracy.ExactLines,
-        ["total_lines"] = accuracy.TotalLines,
-        ["exact_img"] = accuracy.ExactImages,
-        ["images"] = accuracy.Images,
-        ["errors"] = accuracy.Errors,
-        ["total_chars"] = accuracy.TotalChars,
-        ["cer"] = accuracy.Cer,
-        ["char_acc"] = accuracy.CharacterAccuracy,
-    };
+        var node = new JsonObject
+        {
+            ["exact_lines"] = accuracy.ExactLines,
+            ["total_lines"] = accuracy.TotalLines,
+            ["exact_img"] = accuracy.ExactImages,
+            ["images"] = accuracy.Images,
+            ["errors"] = accuracy.Errors,
+            ["total_chars"] = accuracy.TotalChars,
+            ["cer"] = accuracy.Cer,
+            ["char_acc"] = accuracy.CharacterAccuracy,
+        };
+        if (accuracy.ClsCorrect is { } clsCorrect && accuracy.ClsTotal is { } clsTotal)
+        {
+            node["cls_correct"] = clsCorrect;
+            node["cls_total"] = clsTotal;
+        }
+        return node;
+    }
 
     public static RunResult Parse(string path, string? labelOverride, string? metadataPath = null)
     {
@@ -239,64 +250,223 @@ static class BenchSummary
         return new RunResult(label, meta, totals, stageValues, operatorValues, convValues, accuracy);
     }
 
+    public static BenchmarkAccuracy? ComputeAccuracy(IReadOnlyList<BenchmarkRow> rows, string? metadataPath,
+        IReadOnlyList<float[][]>? boxes = null)
+        => ComputeAccuracy(rows.Select((r, i) => (r.File,
+            PredLines(r, boxes is not null && i < boxes.Count ? boxes[i] : null))), metadataPath);
+
     public static BenchmarkAccuracy? ComputeAccuracy(JsonArray rows, string? metadataPath)
+        => ComputeAccuracy(rows.OfType<JsonObject>().Select(row =>
+        {
+            string file = row["file"]?.GetValue<string>() ?? "";
+            return (file, ReadPredictions(row));
+        }), metadataPath);
+
+    private static BenchmarkAccuracy? ComputeAccuracy(
+        IEnumerable<(string File, List<PredLine> Predicted)> rows, string? metadataPath)
     {
-        Dictionary<string, List<string>>? groundTruth = LoadGroundTruth(metadataPath);
+        Dictionary<string, List<GtLine>>? groundTruth = LoadGroundTruth(metadataPath);
         if (groundTruth is null) return null;
 
         int exactLines = 0, totalLines = 0, exactImages = 0, images = 0;
         long errors = 0, totalChars = 0;
-        foreach (JsonNode? rowNode in rows)
+        int clsCorrect = 0, clsTotal = 0;
+        foreach ((string file, List<PredLine> predicted) in rows)
         {
-            if (rowNode is not JsonObject row)
-                continue;
-            string? file = row["file"]?.GetValue<string>();
-            if (file is null || !groundTruth.TryGetValue(file, out List<string>? gtLines))
+            if (!groundTruth.TryGetValue(file, out List<GtLine>? gtLines))
                 continue;
 
-            var predicted = new List<string>();
-            if (row["texts"] is JsonArray texts)
-                foreach (JsonNode? text in texts)
-                    predicted.Add(text?.GetValue<string>() ?? "");
-
+            var remainingText = predicted.Select(p => p.Text).ToList();
             images++;
             bool imageExact = true;
-            foreach (string expected in gtLines)
+            foreach (GtLine expected in gtLines)
             {
                 totalLines++;
-                totalChars += expected.Length;
-                if (predicted.Remove(expected))
+                totalChars += expected.Text.Length;
+                if (remainingText.Remove(expected.Text))
                 {
                     exactLines++;
                     continue;
                 }
 
                 imageExact = false;
-                int best = expected.Length;
-                foreach (string actual in predicted)
-                    best = Math.Min(best, Levenshtein(expected, actual));
+                int best = expected.Text.Length;
+                foreach (PredLine actual in predicted)
+                    best = Math.Min(best, Levenshtein(expected.Text, actual.Text));
                 errors += best;
             }
             if (imageExact) exactImages++;
+
+            (int correct, int total) = ScoreCls(gtLines, predicted);
+            clsCorrect += correct;
+            clsTotal += total;
         }
 
-        return new BenchmarkAccuracy(exactLines, totalLines, exactImages, images, errors, totalChars);
+        return new BenchmarkAccuracy(exactLines, totalLines, exactImages, images, errors, totalChars,
+            clsCorrect, clsTotal);
     }
 
-    public static Dictionary<string, List<string>>? LoadGroundTruth(string? metadataPath)
+    private static List<PredLine> PredLines(BenchmarkRow row, float[][]? boxes)
+    {
+        var lines = new List<PredLine>(row.Texts.Length);
+        for (int i = 0; i < row.Texts.Length; i++)
+        {
+            int rotation = i < row.Rotations.Length ? row.Rotations[i] : 0;
+            float[]? box = boxes is { Length: > 0 } && i < boxes.Length ? boxes[i] : null;
+            lines.Add(new PredLine(row.Texts[i], rotation, box));
+        }
+        return lines;
+    }
+
+    private readonly record struct GtLine(string Text, int ClsDegrees, float X0, float Y0, float X1, float Y1);
+    private readonly record struct PredLine(string Text, int Rotation, float[]? Box);
+
+    private static Dictionary<string, List<GtLine>>? LoadGroundTruth(string? metadataPath)
     {
         if (metadataPath is null || !File.Exists(metadataPath)) return null;
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(metadataPath));
-        var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, List<GtLine>>(StringComparer.OrdinalIgnoreCase);
         foreach (JsonElement image in document.RootElement.GetProperty("images").EnumerateArray())
         {
             string file = image.GetProperty("file").GetString()!;
-            var lines = new List<string>();
+            var lines = new List<GtLine>();
             foreach (JsonElement line in image.GetProperty("lines").EnumerateArray())
-                lines.Add(line.GetProperty("text").GetString() ?? "");
+            {
+                string text = line.GetProperty("text").GetString() ?? "";
+                if (!line.TryGetProperty("cls_degrees", out JsonElement clsEl))
+                    throw new InvalidDataException($"{file} is missing required cls_degrees.");
+                int clsDegrees = (int)Math.Round(clsEl.GetDouble());
+                if (clsDegrees is not (0 or 180))
+                    throw new InvalidDataException($"{file} cls_degrees must be 0 or 180, got {clsDegrees}.");
+                float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                if (line.TryGetProperty("bbox", out JsonElement bbox) && bbox.GetArrayLength() >= 4)
+                {
+                    x0 = bbox[0].GetSingle();
+                    y0 = bbox[1].GetSingle();
+                    x1 = bbox[2].GetSingle();
+                    y1 = bbox[3].GetSingle();
+                }
+                lines.Add(new GtLine(text, clsDegrees, x0, y0, x1, y1));
+            }
             result[file] = lines;
         }
         return result;
+    }
+
+    private static List<PredLine> ReadPredictions(JsonObject row)
+    {
+        var texts = new List<string>();
+        if (row["texts"] is JsonArray textNodes)
+            foreach (JsonNode? text in textNodes)
+                texts.Add(text?.GetValue<string>() ?? "");
+        int[] rotations = ReadIntArray(row["rotations"], texts.Count);
+        float[][]? boxes = ReadBoxes(row["boxes"], texts.Count);
+        var lines = new List<PredLine>(texts.Count);
+        for (int i = 0; i < texts.Count; i++)
+            lines.Add(new PredLine(texts[i], rotations[i], boxes?[i]));
+        return lines;
+    }
+
+    private static int[] ReadIntArray(JsonNode? node, int count)
+    {
+        int[] values = new int[count];
+        if (node is not JsonArray array) return values;
+        for (int i = 0; i < count && i < array.Count; i++)
+            values[i] = array[i]?.GetValue<int>() ?? 0;
+        return values;
+    }
+
+    private static float[][]? ReadBoxes(JsonNode? node, int count)
+    {
+        if (node is not JsonArray array || array.Count == 0) return null;
+        var boxes = new float[count][];
+        for (int i = 0; i < count; i++)
+        {
+            if (i < array.Count && array[i] is JsonArray box && box.Count >= 4)
+            {
+                boxes[i] =
+                [
+                    box[0]!.GetValue<float>(),
+                    box[1]!.GetValue<float>(),
+                    box[2]!.GetValue<float>(),
+                    box[3]!.GetValue<float>(),
+                ];
+            }
+        }
+        return boxes;
+    }
+
+    /// <summary>
+    /// Every GT line with required <c>cls_degrees</c> (0/180 after DET unwarp).
+    /// Prefer IoU against predicted AABBs; fall back to exact-text pairing.
+    /// </summary>
+    private static (int Correct, int Total) ScoreCls(List<GtLine> gtLines, List<PredLine> predicted)
+    {
+        if (gtLines.Count == 0 || predicted.Count == 0) return (0, 0);
+
+        bool useBoxes = predicted.Any(p => p.Box is { Length: >= 4 })
+            && gtLines.Any(g => g.X1 > g.X0 && g.Y1 > g.Y0);
+        if (useBoxes)
+            return ScoreClsByBox(gtLines, predicted);
+        return ScoreClsByText(gtLines, predicted);
+    }
+
+    private static (int Correct, int Total) ScoreClsByBox(List<GtLine> gtLines, List<PredLine> predicted)
+    {
+        const float minIou = 0.3f;
+        var pairs = new List<(int Gi, int Pi, float Iou)>();
+        for (int gi = 0; gi < gtLines.Count; gi++)
+        {
+            GtLine g = gtLines[gi];
+            for (int pi = 0; pi < predicted.Count; pi++)
+            {
+                float[]? box = predicted[pi].Box;
+                if (box is not { Length: >= 4 }) continue;
+                float iou = AabbIou(g.X0, g.Y0, g.X1, g.Y1, box[0], box[1], box[2], box[3]);
+                if (iou >= minIou) pairs.Add((gi, pi, iou));
+            }
+        }
+        pairs.Sort((a, b) => b.Iou.CompareTo(a.Iou));
+        var gtUsed = new bool[gtLines.Count];
+        var predUsed = new bool[predicted.Count];
+        int correct = 0, total = 0;
+        foreach ((int gi, int pi, _) in pairs)
+        {
+            if (gtUsed[gi] || predUsed[pi]) continue;
+            gtUsed[gi] = predUsed[pi] = true;
+            total++;
+            if (predicted[pi].Rotation == gtLines[gi].ClsDegrees) correct++;
+        }
+        return (correct, total);
+    }
+
+    private static (int Correct, int Total) ScoreClsByText(List<GtLine> gtLines, List<PredLine> predicted)
+    {
+        var remaining = predicted.ToList();
+        int correct = 0, total = 0;
+        foreach (GtLine gt in gtLines)
+        {
+            int index = remaining.FindIndex(p => p.Text == gt.Text);
+            if (index < 0) continue;
+            total++;
+            if (remaining[index].Rotation == gt.ClsDegrees) correct++;
+            remaining.RemoveAt(index);
+        }
+        return (correct, total);
+    }
+
+    private static float AabbIou(float ax0, float ay0, float ax1, float ay1,
+        float bx0, float by0, float bx1, float by1)
+    {
+        float ix0 = Math.Max(ax0, bx0), iy0 = Math.Max(ay0, by0);
+        float ix1 = Math.Min(ax1, bx1), iy1 = Math.Min(ay1, by1);
+        float iw = ix1 - ix0, ih = iy1 - iy0;
+        if (iw <= 0 || ih <= 0) return 0;
+        float inter = iw * ih;
+        float areaA = Math.Max(0, ax1 - ax0) * Math.Max(0, ay1 - ay0);
+        float areaB = Math.Max(0, bx1 - bx0) * Math.Max(0, by1 - by0);
+        float union = areaA + areaB - inter;
+        return union <= 0 ? 0 : inter / union;
     }
 
     public static (double Mean, double Median, double P95) Stats(IReadOnlyList<double> values)
@@ -318,7 +488,11 @@ static class BenchSummary
         if (run.Accuracy is { } accuracy)
         {
             Console.WriteLine(
-                $"accuracy exact_lines={accuracy.ExactLines}/{accuracy.TotalLines} " +
+                $"accuracy" +
+                (accuracy.ClsTotal is { } clsTotal
+                    ? $" cls={accuracy.ClsCorrect}/{clsTotal}"
+                    : "") +
+                $" exact_lines={accuracy.ExactLines}/{accuracy.TotalLines} " +
                 $"({Percent(accuracy.ExactLines, accuracy.TotalLines):F2}%) " +
                 $"exact_img={accuracy.ExactImages}/{accuracy.Images} " +
                 $"({Percent(accuracy.ExactImages, accuracy.Images):F2}%) " +
@@ -382,16 +556,18 @@ static class BenchSummary
         {
             Emit();
             Emit("=== accuracy (GT, all images) ===");
-            Emit("run".PadRight(36) + " " + "exact_lines".PadLeft(16) + " " +
+            Emit("run".PadRight(36) + " " + "cls".PadLeft(12) + " " + "exact_lines".PadLeft(16) + " " +
                 "exact_img".PadLeft(12) + " " + "CER".PadLeft(8) + " " + "char_acc".PadLeft(9));
             foreach (RunResult r in runs)
             {
                 if (r.Accuracy is not { } accuracy)
                 {
-                    Emit($"{r.Label,-36} {"-",16} {"-",12} {"-",8} {"-",9}");
+                    Emit($"{r.Label,-36} {"-",12} {"-",16} {"-",12} {"-",8} {"-",9}");
                     continue;
                 }
-                Emit($"{r.Label,-36} {accuracy.ExactLines + "/" + accuracy.TotalLines,16} " +
+                string cls = accuracy.ClsTotal is { } clsTotal
+                    ? $"{accuracy.ClsCorrect}/{clsTotal}" : "-";
+                Emit($"{r.Label,-36} {cls,12} {accuracy.ExactLines + "/" + accuracy.TotalLines,16} " +
                     $"{accuracy.ExactImages + "/" + accuracy.Images,12} " +
                     $"{accuracy.Cer * 100,7:F2}% {accuracy.CharacterAccuracy * 100,8:F2}%");
             }
@@ -472,7 +648,10 @@ static class BenchSummary
         int images = a["images"]?.GetValue<int>() ?? 0;
         long errors = a["errors"]?.GetValue<long>() ?? 0;
         long totalChars = a["total_chars"]?.GetValue<long>() ?? 0;
-        return new BenchmarkAccuracy(exactLines, totalLines, exactImg, images, errors, totalChars);
+        int? clsCorrect = a["cls_correct"]?.GetValue<int>();
+        int? clsTotal = a["cls_total"]?.GetValue<int>();
+        return new BenchmarkAccuracy(exactLines, totalLines, exactImg, images, errors, totalChars,
+            clsCorrect, clsTotal);
     }
 
     private static string? GuessMetadata(string resultPath)

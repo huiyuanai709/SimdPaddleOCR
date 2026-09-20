@@ -53,6 +53,8 @@ sealed class CEngine : IBenchEngine
             Detected = result.detected_count,
             Texts = result.result.Select(x => x.text).ToArray(),
             Rotations = result.result.Select(x => x.rotation).ToArray(),
+            Boxes = result.result.Select(x => BenchBoxes.Aabb(x.x1, x.y1, x.x2, x.y2, x.x3, x.y3, x.x4, x.y4))
+                .ToArray(),
         };
     }
 
