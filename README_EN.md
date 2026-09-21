@@ -96,14 +96,14 @@ finally
 
 ## NuGet packages
 
-| NuGet package | Version | Description |
-| --- | --- | --- |
-| `Sdcb.SimdPaddleOCR` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR) | Pure-managed inference core (`net10.0;netstandard2.0`) |
-| `Sdcb.SimdPaddleOCR.ModelProvider` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.ModelProvider.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.ModelProvider) | Model contracts (`IPaddleOcrModelProvider` / `PaddleOcrModelBundle`), usually referenced transitively |
-| `Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny) | PP-OCRv6 tiny DET+REC+dictionary; `ChineseV6TinyModels.Default` includes CLS |
-| `Sdcb.SimdPaddleOCR.Models.ChineseV6Small` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small) | PP-OCRv6 small; `ChineseV6SmallModels.Default` |
-| `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium) | PP-OCRv6 medium; `ChineseV6MediumModels.Default` |
-| `Sdcb.SimdPaddleOCR.Models.TextLineOrientation` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.TextLineOrientation.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.TextLineOrientation) | PP-LCNet text-line orientation CLS, transitively referenced by the three Chinese model packages |
+| NuGet package                                   | Version                                                                                                                                                                    | Description                                                                                           |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `Sdcb.SimdPaddleOCR`                            | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR)                                                       | Pure-managed inference core (`net10.0;netstandard2.0`)                                                |
+| `Sdcb.SimdPaddleOCR.ModelProvider`              | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.ModelProvider.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.ModelProvider)                           | Model contracts (`IPaddleOcrModelProvider` / `PaddleOcrModelBundle`), usually referenced transitively |
+| `Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny`       | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny)             | PP-OCRv6 tiny DET+REC+dictionary; `ChineseV6TinyModels.Default` includes CLS                          |
+| `Sdcb.SimdPaddleOCR.Models.ChineseV6Small`      | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small)           | PP-OCRv6 small; `ChineseV6SmallModels.Default`                                                        |
+| `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium)         | PP-OCRv6 medium; `ChineseV6MediumModels.Default`                                                      |
+| `Sdcb.SimdPaddleOCR.Models.TextLineOrientation` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.TextLineOrientation.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.TextLineOrientation) | PP-LCNet text-line orientation CLS, transitively referenced by the three Chinese model packages       |
 
 Each `IPaddleOcrModelProvider` exposes `Name`, `Kind`, `Format`, language and version metadata, plus `OpenRead()` / `OpenReadAsync()`. A full OCR set is a `PaddleOcrModelBundle` (DET, REC, dictionary, and optional CLS). The current language code is `zh`. Individual models can also be consumed by other inference implementations, for example `ChineseV6TinyModel.Detection.OpenReadAsync()`. `Model`, `PaddleOcrDetector`, `PaddleOcrClassifier`, `PaddleOcrRecognizer`, and `PaddleOcrAll` all accept Stream load entry points; after parsing they do not keep the full raw ONNX bytes.
 
@@ -171,16 +171,16 @@ Without it, ILC targets the SSE2 / 128-bit `Vector<T>` baseline, `Avx2.IsSupport
 
 ## Support
 
-| | Notes |
-| --- | --- |
-| Target frameworks | Core `net10.0;netstandard2.0`; `ModelProvider` and all model packages are `netstandard2.0` |
-| Recommended runtime | .NET 10: full x86 SIMD and NativeAOT (`IsAotCompatible`) |
-| Compatible runtime | `netstandard2.0` can run on .NET Framework 4.8 and similar; AVX / AVX-512 / VNNI sources are excluded at compile time, falling back to `System.Numerics.Vector` / scalar |
-| CI architectures | Windows x64 / x86 / ARM64, Linux x64 / ARM64, macOS x64 / ARM64 |
-| SIMD | .NET 10 probes AVX → AVX2 → AVX-512 / VNNI at runtime; Vector/scalar when those ISAs are missing or on ARM |
-| Input | Interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 also accepted); no image path, file, or image-library API |
-| Device | CPU only, no GPU |
-| NativeAOT | Keep the core assembly and the model assemblies you use when publishing trimmed |
+|                     | Notes                                                                                                                                                                    |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Target frameworks   | Core `net10.0;netstandard2.0`; `ModelProvider` and all model packages are `netstandard2.0`                                                                               |
+| Recommended runtime | .NET 10: full x86 SIMD and NativeAOT (`IsAotCompatible`)                                                                                                                 |
+| Compatible runtime  | `netstandard2.0` can run on .NET Framework 4.8 and similar; AVX / AVX-512 / VNNI sources are excluded at compile time, falling back to `System.Numerics.Vector` / scalar |
+| CI architectures    | Windows x64 / x86 / ARM64, Linux x64 / ARM64, macOS x64 / ARM64                                                                                                          |
+| SIMD                | .NET 10 probes AVX → AVX2 → AVX-512 / VNNI at runtime; Vector/scalar when those ISAs are missing or on ARM                                                               |
+| Input               | Interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 also accepted); no image path, file, or image-library API                                                  |
+| Device              | CPU only, no GPU                                                                                                                                                         |
+| NativeAOT           | Keep the core assembly and the model assemblies you use when publishing trimmed                                                                                          |
 
 ## License and third-party components
 
@@ -206,15 +206,15 @@ CI tiny is **767/1032**, CER **2.36%** on the full 100 (cls 1020/1020; 1.3 skip-
 
 Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
 
-| Path | 1.3 | 1.4.2 | vs 1.3 | WS peak |
-| --- | ---: | ---: | ---: | ---: |
-| linux-arm64 N2 `tiny-4w` (net10 AdvSIMD) | 241 | **180** | **0.75×** | 840 → **572 MB** |
-| linux-arm64 `tiny-4w-ns2` | 374 | **295** | **0.79×** | |
-| linux-arm64 `tiny-4w-scalar` | 984 | **856** | **0.87×** | |
-| win-x64 7763 `tiny-4w` (AVX2) | 167 | ~184 | flat (noise) | 817 → **515 MB** |
-| win-x64 7763 `tiny-4w-ns2` | **343** | **228** | **0.66×** | |
-| win-x64 7763 `tiny-4w-noavx` | 481 | **380** | **0.79×** | |
-| win-x64 7763 `tiny-4w-scalar` | 1368 | **1220** | **0.89×** | |
+| Path                                     |     1.3 |    1.4.2 |       vs 1.3 |          WS peak |            Δ WS |
+| ---------------------------------------- | ------: | -------: | -----------: | ---------------: | --------------: |
+| linux-arm64 N2 `tiny-4w` (net10 AdvSIMD) |     241 |  **180** |    **0.75×** | 840 → **572 MB** | 418 → **162 MB** |
+| linux-arm64 `tiny-4w-ns2`                |     374 |  **295** |    **0.79×** |                  |                 |
+| linux-arm64 `tiny-4w-scalar`             |     984 |  **856** |    **0.87×** |                  |                 |
+| win-x64 7763 `tiny-4w` (AVX2)            |     167 |     ~184 | flat (noise) | 817 → **515 MB** | 398 → **107 MB** |
+| win-x64 7763 `tiny-4w-ns2`               | **343** |  **228** |    **0.66×** |                  |                 |
+| win-x64 7763 `tiny-4w-noavx`             |     481 |  **380** |    **0.79×** |                  |                 |
+| win-x64 7763 `tiny-4w-scalar`            |    1368 | **1220** |    **0.89×** |                  |                 |
 
 Local Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images (n=99), this library mean (1.3 NuGet → 1.4.2): tiny **86.0 → 63.1 ms** (0.73×), small **222 → 200 ms** (0.90×), medium **628 → 585 ms** (0.93×). Same machine ns2: tiny **203 → 96.5 ms** (0.48×), small **432 → 303 ms** (0.70×), medium **1606 → 874 ms** (0.54×).
 Same-machine C engine and per-ISA ratios: [`docs/perf.md`](docs/perf.md).
@@ -227,6 +227,6 @@ runs unit tests and benches tiny / small / medium on Windows / Linux / macOS acr
 
 ## WeChat group
 
-![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?0915)
+![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?0921)
 
 If the WeChat QR code has expired, join the QQ group [C#/.NET Computer Vision 579060605](https://qm.qq.com/q/bPw5jAK4qk).
