@@ -227,6 +227,6 @@ GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 
 ## 微信群
 
-![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?0921)
+![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?0922)
 
 如果微信群二维码过期了，请加入 QQ 群 [C#/.NET计算机视觉技术交流 579060605](https://qm.qq.com/q/bPw5jAK4qk)。
