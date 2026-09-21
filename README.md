@@ -26,15 +26,34 @@ using System.Runtime.InteropServices;
 using Sdcb.SimdPaddleOCR;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.PixelFormats;
+
 using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default);
-using Image<Rgba32> image = await Image.LoadAsync<Rgba32>("sample.jpg");
+using Image<Rgba32> image = await Image.LoadAsync<Rgba32>(CreateDecoderOptions(), "sample.jpg");
+Rgba32[]? packedCopy = null;
 if (!image.DangerousTryGetSinglePixelMemory(out Memory<Rgba32> memory))
-    throw new InvalidDataException("图片像素不是连续内存");
+{
+    packedCopy = new Rgba32[checked(image.Width * image.Height)];
+    image.CopyPixelDataTo(packedCopy);
+    memory = packedCopy;
+}
+
 PaddleOcrResult result = ocr.Run(MemoryMarshal.AsBytes(memory.Span), image.Width, image.Height,
     format: ImagePixelFormat.Rgba32);
 Console.WriteLine(result.Text);
+
+// 必须 Clone Default：直接改 Configuration.Default 会丢掉 PNG/JPEG 解码器。
+// 默认分配器按 4MB 分块，大图会让 DangerousTryGetSinglePixelMemory 失败。
+static DecoderOptions CreateDecoderOptions()
+{
+    Configuration configuration = Configuration.Default.Clone();
+    configuration.PreferContiguousImageBuffers = true;
+    return new DecoderOptions { Configuration = configuration };
+}
 ```
+
+ImageSharp 默认分配器会把像素拆成 4MB 块，大图上 `DangerousTryGetSinglePixelMemory` 会失败。用独立 `Configuration` 打开 `PreferContiguousImageBuffers` 尽量零拷贝；仍不连续再 `CopyPixelDataTo`。不要改 `Configuration.Default`。
 
 后续三个示例由调用方把 lock / 原生指针包成 `ReadOnlySpan<byte>` 再交给 `Run`，加载方式与上面相同。整段 `Run` 期间不要 Unlock / Dispose 源图。
 
@@ -168,6 +187,10 @@ x64 发布 Native AOT 时，可执行项目里**必须**设置：
 ```
 
 不设的话，ILC 按 SSE2 / 128-bit `Vector<T>` 基线编译，`Avx2.IsSupported` 会被折成 `false`，AVX2 内核整段裁掉，推理会慢一截。没有 AVX2 的 CPU 不要设这项。ARM64 的 AOT 基线已带 NEON / `AdvSimd`，一般不用写 `IlcInstructionSet`。
+
+### ImageSharp 报「图片像素不是连续内存」或 `DangerousTryGetSinglePixelMemory` 失败？
+
+ImageSharp 默认分配器会把像素拆成 4MB 块，大图上拿不到一整块连续缓冲。按上面「ImageSharp 3」示例：`Clone` 一份 `Configuration` 后打开 `PreferContiguousImageBuffers`，仍不连续再 `CopyPixelDataTo`。不要改 `Configuration.Default`，否则 PNG/JPEG 解码器会丢。完整写法见 `examples/ImageSharp.AspNetCore/Program.cs`。
 
 ## 支持范围
 

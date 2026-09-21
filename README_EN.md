@@ -26,15 +26,34 @@ using System.Runtime.InteropServices;
 using Sdcb.SimdPaddleOCR;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.PixelFormats;
+
 using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default);
-using Image<Rgba32> image = await Image.LoadAsync<Rgba32>("sample.jpg");
+using Image<Rgba32> image = await Image.LoadAsync<Rgba32>(CreateDecoderOptions(), "sample.jpg");
+Rgba32[]? packedCopy = null;
 if (!image.DangerousTryGetSinglePixelMemory(out Memory<Rgba32> memory))
-    throw new InvalidDataException("Image pixels are not a single contiguous buffer");
+{
+    packedCopy = new Rgba32[checked(image.Width * image.Height)];
+    image.CopyPixelDataTo(packedCopy);
+    memory = packedCopy;
+}
+
 PaddleOcrResult result = ocr.Run(MemoryMarshal.AsBytes(memory.Span), image.Width, image.Height,
     format: ImagePixelFormat.Rgba32);
 Console.WriteLine(result.Text);
+
+// Clone Default so PNG/JPEG decoders stay registered. Do not set this on Configuration.Default.
+// Default allocator splits pixels into 4MB chunks; large images then fail DangerousTryGetSinglePixelMemory.
+static DecoderOptions CreateDecoderOptions()
+{
+    Configuration configuration = Configuration.Default.Clone();
+    configuration.PreferContiguousImageBuffers = true;
+    return new DecoderOptions { Configuration = configuration };
+}
 ```
+
+ImageSharp's default allocator splits pixels into 4MB chunks, so `DangerousTryGetSinglePixelMemory` fails on large images. Clone a `Configuration`, set `PreferContiguousImageBuffers` for a zero-copy buffer when possible, and fall back to `CopyPixelDataTo`. Do not mutate `Configuration.Default`.
 
 The next three samples wrap a lock / native pointer as `ReadOnlySpan<byte>` before `Run`. Do not Unlock / Dispose the source until `Run` returns.
 
@@ -168,6 +187,10 @@ When publishing Native AOT on x64, the executable project **must** set:
 ```
 
 Without it, ILC targets the SSE2 / 128-bit `Vector<T>` baseline, `Avx2.IsSupported` is folded to `false`, the AVX2 kernels are stripped, and inference is much slower. Do not set this on CPUs without AVX2. ARM64 AOT already includes NEON / `AdvSimd` in the baseline, so you usually do not need `IlcInstructionSet`.
+
+### ImageSharp throws "pixels are not a single contiguous buffer" or `DangerousTryGetSinglePixelMemory` fails?
+
+ImageSharp's default allocator splits pixels into 4MB chunks, so large images do not get one packed buffer. Follow the ImageSharp 3 sample above: clone `Configuration`, set `PreferContiguousImageBuffers`, and fall back to `CopyPixelDataTo`. Do not mutate `Configuration.Default` or PNG/JPEG decoders disappear. The full pattern is in `examples/ImageSharp.AspNetCore/Program.cs`.
 
 ## Support
 
