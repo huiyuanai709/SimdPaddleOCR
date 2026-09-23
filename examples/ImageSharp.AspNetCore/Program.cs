@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using ImageSharp.AspNetCore;
@@ -44,7 +45,7 @@ app.MapPost("/api/ocr", RecognizeAsync)
     .WithName("RecognizeImage")
     .WithTags("OCR")
     .WithSummary("识别图片中的文字")
-    .WithDescription("上传图片并选择 tiny、small 或 medium 模型，返回识别文本、检测框和耗时。")
+    .WithDescription("上传图片并选择 tiny、small 或 medium 模型，返回识别文本、检测框和耗时。表单字段 characters=true 时，每一行额外返回单字框（text、score、四个点）；不传该字段则响应中不含 characters。")
     .Produces<OcrResponse>()
     .Produces<OcrError>(StatusCodes.Status400BadRequest)
     .Produces<OcrError>(StatusCodes.Status500InternalServerError)
@@ -86,8 +87,10 @@ static async Task<IResult> RecognizeAsync(
 
         stage.Restart();
         PaddleOcrAll ocr = await engine.GetAsync(model);
-        PaddleOcrResult result = ocr.Run(MemoryMarshal.AsBytes(memory.Span), image.Width, image.Height,
-            format: ImagePixelFormat.Rgba32);
+        ReadOnlySpan<byte> pixels = MemoryMarshal.AsBytes(memory.Span);
+        PaddleOcrResult result = upload.Characters
+            ? ocr.Run(pixels, image.Width, image.Height, returnCtcAlignment: true, format: ImagePixelFormat.Rgba32)
+            : ocr.Run(pixels, image.Width, image.Height, format: ImagePixelFormat.Rgba32);
         double ocrMs = stage.Elapsed.TotalMilliseconds;
         total.Stop();
 
@@ -100,7 +103,7 @@ static async Task<IResult> RecognizeAsync(
                 Math.Round(decodeMs, 1),
                 Math.Round(ocrMs, 1),
                 Math.Round(total.Elapsed.TotalMilliseconds, 1)),
-            [.. result.Lines.Select(ToLineDto)]));
+            [.. result.Lines.Select(line => ToLineDto(line, upload.Characters))]));
     }
     catch (UnknownImageFormatException)
     {
@@ -120,18 +123,36 @@ static async Task<IResult> RecognizeAsync(
     }
 }
 
-static OcrLineDto ToLineDto(PaddleOcrLine line) => new(
-    line.Text,
-    line.RecognitionScore,
+static OcrLineDto ToLineDto(PaddleOcrLine line, bool characters)
+{
+    OcrLineDto dto = new(
+        line.Text,
+        line.RecognitionScore,
+        [
+            [line.Box.X1, line.Box.Y1],
+            [line.Box.X2, line.Box.Y2],
+            [line.Box.X3, line.Box.Y3],
+            [line.Box.X4, line.Box.Y4]
+        ],
+        line.Box.Score,
+        line.ClassificationScore,
+        line.AppliedRotationDegrees);
+    if (!characters) return dto;
+    return dto with
+    {
+        Characters = [.. line.EstimateCharacterBoxes().Select(ToCharacterDto)]
+    };
+}
+
+static OcrCharacterDto ToCharacterDto(PaddleOcrCharacterBox box) => new(
+    box.Text,
+    box.Score,
     [
-        [line.Box.X1, line.Box.Y1],
-        [line.Box.X2, line.Box.Y2],
-        [line.Box.X3, line.Box.Y3],
-        [line.Box.X4, line.Box.Y4]
-    ],
-    line.Box.Score,
-    line.ClassificationScore,
-    line.AppliedRotationDegrees);
+        [box.X1, box.Y1],
+        [box.X2, box.Y2],
+        [box.X3, box.Y3],
+        [box.X4, box.Y4]
+    ]);
 
 static string? ResolveSampleImage(IWebHostEnvironment env)
 {
@@ -156,6 +177,9 @@ internal sealed class OcrUpload
 {
     public IFormFile? File { get; init; }
     public string? Model { get; init; }
+
+    [Description("为 true 时每一行返回单字框。不传则响应中不含 characters。")]
+    public bool Characters { get; init; }
 }
 
 // Clone Default so PNG/JPEG decoders stay registered. Do not set this on Configuration.Default.

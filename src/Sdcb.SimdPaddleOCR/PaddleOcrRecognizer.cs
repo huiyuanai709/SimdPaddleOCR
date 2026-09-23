@@ -125,7 +125,20 @@ public sealed class PaddleOcrRecognizer : IDisposable
 
     public PaddleOcrRecognitionResult Recognize(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
-        => Recognize(source, sourceWidth, sourceHeight, sourceStride, format, _compiled.IntraOpThreads);
+        => Recognize(source, sourceWidth, sourceHeight, sourceStride, format, _compiled.IntraOpThreads, false);
+
+    /// <summary>
+    /// Same as <see cref="Recognize(ReadOnlySpan{byte}, int, int, int, ImagePixelFormat)"/>,
+    /// and keeps one <see cref="PaddleOcrCtcSpan"/> per emitted token when
+    /// <paramref name="returnCtcAlignment"/> is true. A span is the half-open
+    /// run of that class: repeated frames are included, blank frames are excluded.
+    /// The flag does not change the graph or the session. False allocates nothing
+    /// beyond the text, and <see cref="PaddleOcrRecognitionResult.CtcSpans"/> stays null.
+    /// </summary>
+    public PaddleOcrRecognitionResult Recognize(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        bool returnCtcAlignment, int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
+        => Recognize(source, sourceWidth, sourceHeight, sourceStride, format, _compiled.IntraOpThreads,
+            returnCtcAlignment);
 
     /// <summary>
     /// Per-call intra-op override for the line stage: callers that own idle
@@ -135,7 +148,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
     /// arithmetic, so results are identical at any budget.
     /// </summary>
     internal PaddleOcrRecognitionResult Recognize(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        int sourceStride, ImagePixelFormat format, int intraOpThreads)
+        int sourceStride, ImagePixelFormat format, int intraOpThreads, bool returnCtcAlignment)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrRecognizer));
         sourceStride = ImagePixels.ResolveStride(sourceWidth, sourceStride, format);
@@ -180,7 +193,8 @@ public sealed class PaddleOcrRecognizer : IDisposable
                     throw new InvalidDataException("Recognizer output size mismatch.");
                 started = profile ? PipelineProfiler.Now() : 0;
                 PaddleOcrRecognitionResult result = Decode(decoded.Dense, decoded.Indices,
-                    decoded.Scores, timeSteps, resizedWidth, decoded.DenseIsLogits);
+                    decoded.Scores, timeSteps, resizedWidth, targetWidth, decoded.DenseIsLogits,
+                    returnCtcAlignment);
                 if (profile) PipelineProfiler.Add(PipelineProfiler.RecDecode, started);
                 return result;
             }
@@ -256,7 +270,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
     /// </summary>
     internal void RecognizeBatch(byte[] cropBuffer, int[] offsets, int[] cropBytes,
         int[] widths, int[] heights, ReadOnlySpan<int> lineIndices, int targetWidth,
-        PaddleOcrRecognitionResult[] results, int intraOpThreads)
+        PaddleOcrRecognitionResult[] results, int intraOpThreads, bool returnCtcAlignment)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrRecognizer));
         int n = lineIndices.Length;
@@ -310,7 +324,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
                         decoded.IsCompact ? [] : decoded.Dense.Slice(k * sampleOutput, sampleOutput),
                         decoded.IsCompact ? decoded.Indices.Slice(k * timeSteps, timeSteps) : [],
                         decoded.IsCompact ? decoded.Scores.Slice(k * timeSteps, timeSteps) : [],
-                        timeSteps, resizedWidths[k], decoded.DenseIsLogits);
+                        timeSteps, resizedWidths[k], targetWidth, decoded.DenseIsLogits, returnCtcAlignment);
                 if (profile) PipelineProfiler.Add(PipelineProfiler.RecDecode, started);
             }
             finally { decoded.Dispose(); }
@@ -370,15 +384,31 @@ public sealed class PaddleOcrRecognizer : IDisposable
 
     private PaddleOcrRecognitionResult Decode(ReadOnlySpan<float> dense,
         ReadOnlySpan<int> compactIndices, ReadOnlySpan<float> compactScores,
-        int timeSteps, int resizedWidth, bool denseIsLogits)
+        int timeSteps, int resizedWidth, int tensorWidth, bool denseIsLogits, bool returnCtcAlignment)
+        => DecodeCtc(_labels, _maxLabelChars, returnCtcAlignment,
+            dense, compactIndices, compactScores, timeSteps, resizedWidth, tensorWidth, denseIsLogits);
+
+    /// <summary>
+    /// Greedy CTC decode. Each emitted token's span is the half-open run of
+    /// that class: repeated frames are included, and blank frames are excluded.
+    /// A run that reaches the last step keeps <paramref name="timeSteps"/> as
+    /// its exclusive end.
+    /// </summary>
+    internal static PaddleOcrRecognitionResult DecodeCtc(string[] labels, int maxLabelChars, bool capture,
+        ReadOnlySpan<float> dense, ReadOnlySpan<int> compactIndices, ReadOnlySpan<float> compactScores,
+        int timeSteps, int resizedWidth, int tensorWidth, bool denseIsLogits)
     {
         bool compact = !compactIndices.IsEmpty;
-        int previous = 0, emitted = 0, textLength = 0;
+        int classCount = checked(labels.Length + 2);
+        int previous = 0, emitted = 0, textLength = 0, open = -1;
         double scoreSum = 0;
         // Rent scratch for this call so the recognizer stays thread-safe; only
         // the returned immutable string is allocated for the decoded text.
-        int requiredChars = checked(timeSteps * Math.Max(1, _maxLabelChars));
+        // Alignment scratch is rented only when requested and holds no
+        // references, so returning it does not keep dictionary strings alive.
+        int requiredChars = checked(timeSteps * Math.Max(1, maxLabelChars));
         char[] rented = PooledArrays.Rent<char>(requiredChars);
+        CtcRun[]? runs = capture && timeSteps > 0 ? PooledArrays.Rent<CtcRun>(timeSteps) : null;
         try
         {
             Span<char> textScratch = rented;
@@ -386,7 +416,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
             {
                 ReadOnlySpan<float> rowValues = compact
                     ? []
-                    : dense.Slice(step * ClassCount, ClassCount);
+                    : dense.Slice(step * classCount, classCount);
                 int best;
                 float bestValue;
                 if (compact)
@@ -397,11 +427,11 @@ public sealed class PaddleOcrRecognizer : IDisposable
                 else best = ArgMax.Find(rowValues, out bestValue);
                 if (best != 0 && (step == 0 || best != previous))
                 {
-                    if (best == _labels.Length + 1)
+                    if (best == labels.Length + 1)
                         textScratch[textLength++] = ' ';
                     else
                     {
-                        string label = _labels[best - 1];
+                        string label = labels[best - 1];
                         label.AsSpan().CopyTo(textScratch[textLength..]);
                         textLength += label.Length;
                     }
@@ -409,19 +439,71 @@ public sealed class PaddleOcrRecognizer : IDisposable
                     // Compute only the probability that contributes to the
                     // result score; blank and CTC-repeat rows need no exp at
                     // all.
-                    scoreSum += compact
+                    float probability = compact
                         ? bestValue
                         : denseIsLogits
                         ? SimdKernels.SoftmaxMaximumProbability(rowValues, bestValue)
                         : bestValue;
+                    scoreSum += probability;
+                    if (runs is not null)
+                    {
+                        if (open >= 0) runs[open].End = step;
+                        runs[emitted] = new CtcRun
+                        {
+                            Start = step,
+                            End = timeSteps,
+                            Label = best == labels.Length + 1 ? -1 : best - 1,
+                            Score = probability
+                        };
+                        open = emitted;
+                    }
                     emitted++;
+                }
+                else if (runs is not null && open >= 0 && best != previous)
+                {
+                    // A blank ends the run. The blank frame is excluded;
+                    // repeated frames of this class stayed inside until here.
+                    runs[open].End = step;
+                    open = -1;
                 }
                 previous = best;
             }
-            return new PaddleOcrRecognitionResult(new string(rented, 0, textLength), emitted == 0 ? 0 : (float)(scoreSum / emitted),
-                emitted, resizedWidth, timeSteps);
+            PaddleOcrCtcSpan[]? spans = null;
+            if (capture) spans = emitted == 0 ? [] : MaterializeRuns(labels, runs!, emitted);
+            return new PaddleOcrRecognitionResult(new string(rented, 0, textLength),
+                emitted == 0 ? 0 : (float)(scoreSum / emitted),
+                emitted, resizedWidth, timeSteps)
+            {
+                TensorWidth = tensorWidth,
+                CtcSpans = spans
+            };
         }
-        finally { PooledArrays.Return(rented); }
+        finally
+        {
+            PooledArrays.Return(rented);
+            PooledArrays.Return(runs);
+        }
+    }
+
+    private static PaddleOcrCtcSpan[] MaterializeRuns(string[] labels, CtcRun[] runs, int emitted)
+    {
+        PaddleOcrCtcSpan[] spans = new PaddleOcrCtcSpan[emitted];
+        for (int i = 0; i < emitted; i++)
+        {
+            CtcRun run = runs[i];
+            string text = run.Label < 0 ? " " : labels[run.Label];
+            spans[i] = new PaddleOcrCtcSpan(text, run.Score, run.Start, run.End);
+        }
+        return spans;
+    }
+
+    /// <summary>Pooled decode scratch. Label -1 is the CTC space token.</summary>
+    private struct CtcRun
+    {
+        public int Start;
+        public int End;
+        public int Label;
+        public float Score;
     }
 
     private int SelectTargetWidth(int sourceWidth, int sourceHeight)

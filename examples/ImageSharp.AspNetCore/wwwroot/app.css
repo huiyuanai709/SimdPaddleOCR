@@ -107,8 +107,11 @@ button:disabled {
   align-items: center;
 }
 
-.models .show-original {
+.models .view-toggles {
   margin-left: auto;
+  display: flex;
+  gap: 16px;
+  align-items: center;
 }
 
 .layout {
@@ -195,5 +198,5 @@ footer.error { color: var(--danger); }
   .path, .primary { grid-column: 1 / -1; }
   .layout { grid-template-columns: 1fr; }
   .models { flex-wrap: wrap; }
-  .models .show-original { margin-left: 0; }
+  .models .view-toggles { margin-left: 0; }
 }

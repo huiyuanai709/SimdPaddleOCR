@@ -148,8 +148,46 @@ public readonly record struct PaddleOcrClassificationResult(uint Label, float Sc
     public int OrientationDegrees => Label == 0 ? 0 : 180;
 }
 
+/// <summary>CTC decode of one crop. <see cref="CtcSpans"/> is null unless alignment was requested.</summary>
+/// <param name="ResizedWidth">
+/// Recognizer content width after the height-48 resize, before right padding.
+/// </param>
 public readonly record struct PaddleOcrRecognitionResult(string Text, float Score, int EmittedCount,
-    int ResizedWidth, int TimeSteps);
+    int ResizedWidth, int TimeSteps)
+{
+    /// <summary>
+    /// Recognizer tensor width, including right padding out to the width bucket.
+    /// CTC time steps span this width, so content occupies the leading
+    /// <c>ResizedWidth / TensorWidth</c> fraction. Zero when unset.
+    /// </summary>
+    public int TensorWidth { get; init; }
+
+    /// <summary>
+    /// One <see cref="PaddleOcrCtcSpan"/> per emitted token, in reading order.
+    /// Null when this call did not pass <c>returnCtcAlignment: true</c>.
+    /// An empty array means alignment was captured and the line emitted nothing.
+    /// </summary>
+    public PaddleOcrCtcSpan[]? CtcSpans { get; init; }
+}
+
+/// <summary>
+/// Half-open time-step run of one emitted token: repeated frames of that class
+/// are included, and blank frames are excluded.
+/// </summary>
+public readonly record struct PaddleOcrCtcSpan(string Text, float Score, int StartColumn, int EndColumn);
+
+/// <summary>
+/// Estimated quad of one CTC token on the source image. Neighboring boxes split
+/// the blank gap between <see cref="PaddleOcrCtcSpan"/> runs at its midpoint and
+/// share that edge; a side with no neighbor keeps the trigger edge. Point order
+/// matches the character rectangle in the crop the recognizer read (left-top,
+/// right-top, right-bottom, left-bottom) after undoing a 180° line rotation and,
+/// for a tall quad, the same 90° rotation the crop uses.
+/// </summary>
+public readonly record struct PaddleOcrCharacterBox(
+    string Text, float Score,
+    float X1, float Y1, float X2, float Y2,
+    float X3, float Y3, float X4, float Y4);
 
 public sealed class PaddleOcrLine
 {
@@ -160,6 +198,25 @@ public sealed class PaddleOcrLine
     public required uint ClassificationLabel { get; init; }
     public required int AppliedRotationDegrees { get; init; }
     public required uint EmittedCount { get; init; }
+    /// <summary>
+    /// CTC emissions for this line. Null unless this call passed
+    /// <c>returnCtcAlignment: true</c>.
+    /// </summary>
+    public PaddleOcrCtcSpan[]? CtcSpans { get; init; }
+    /// <summary>Recognizer content width. See <see cref="PaddleOcrRecognitionResult.ResizedWidth"/>.</summary>
+    public int RecognitionContentWidth { get; init; }
+    /// <summary>Recognizer tensor width. See <see cref="PaddleOcrRecognitionResult.TensorWidth"/>.</summary>
+    public int RecognitionTensorWidth { get; init; }
+    /// <summary>CTC time steps spanning <see cref="RecognitionTensorWidth"/>.</summary>
+    public int RecognitionTimeSteps { get; init; }
+
+    /// <summary>
+    /// Maps <see cref="CtcSpans"/> onto <see cref="Box"/>. Blank gaps between
+    /// spans are split at their midpoint. Requires <c>returnCtcAlignment: true</c>
+    /// on the <see cref="PaddleOcrAll.Run"/> or <see cref="PaddleOcrRecognizer.Recognize"/>
+    /// call that produced this line.
+    /// </summary>
+    public PaddleOcrCharacterBox[] EstimateCharacterBoxes() => PaddleOcrCharacterBoxes.Estimate(this);
 }
 
 public sealed class PaddleOcrResult

@@ -1,7 +1,9 @@
 // Standalone in-place OCR overlay. Usage:
-//   OcrOverlay.draw(ctx, image, lines, { showOriginal: false })
-// lines: [{ text, box: [[x,y],[x,y],[x,y],[x,y]] }, ...]
+//   OcrOverlay.draw(ctx, image, lines, { showOriginal: false, showCharacters: false })
+// lines: [{ text, box: [[x,y],...], characters: [{ text, box }] }, ...]
 // ctx must be a 2d context (willReadFrequently recommended).
+// showOriginal draws the image alone. showCharacters strokes per-character
+// quads on the image. Neither keeps the line cover.
 (function (global) {
   const FONT_STACK = '"Microsoft YaHei UI", "Segoe UI", sans-serif';
 
@@ -14,6 +16,21 @@
 
   function dist(a, b) {
     return Math.hypot(b[0] - a[0], b[1] - a[1]);
+  }
+
+  // Character quads already follow the recognition direction: point 0 to point 1
+  // is the writing edge. Do not swap edges when the box is taller than it is wide.
+  function characterGeometry(pts) {
+    const along = pts[1];
+    const len = dist(pts[0], along);
+    const ht = dist(pts[0], pts[3]);
+    return {
+      cx: (pts[0][0] + pts[1][0] + pts[2][0] + pts[3][0]) / 4,
+      cy: (pts[0][1] + pts[1][1] + pts[2][1] + pts[3][1]) / 4,
+      len,
+      ht,
+      angle: Math.atan2(along[1] - pts[0][1], along[0] - pts[0][0]),
+    };
   }
 
   function quadGeometry(pts) {
@@ -158,13 +175,37 @@
     };
   }
 
-  function fillQuad(ctx, pts, color) {
+  function traceQuad(ctx, pts) {
     ctx.beginPath();
     ctx.moveTo(pts[0][0], pts[0][1]);
     for (let i = 1; i < 4; i++) ctx.lineTo(pts[i][0], pts[i][1]);
     ctx.closePath();
+  }
+
+  function fillQuad(ctx, pts, color) {
+    traceQuad(ctx, pts);
     ctx.fillStyle = cssRgb(color);
     ctx.fill();
+  }
+
+  function strokeQuad(ctx, pts, color, width) {
+    traceQuad(ctx, pts);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+  }
+
+  // One size for the whole line, from the interior boxes. End boxes are narrower
+  // because outer blanks stay outside them; fitting each box would shrink the ends.
+  function sharedCharacterSize(ctx, glyphs) {
+    const body = glyphs.filter((g) => !g.blank);
+    const interior = body.length >= 3 ? body.slice(1, -1) : body;
+    const use = interior.length ? interior : body;
+    const maxW = median(use.map((g) => g.geom.len)) || median(glyphs.map((g) => g.geom.len));
+    const maxH = median(use.map((g) => g.geom.ht)) || median(glyphs.map((g) => g.geom.ht));
+    const cjk = use.find((g) => /[\u3400-\u9fff]/.test(g.text));
+    const sample = cjk ? [...cjk.text][0] : (use.find((g) => g.text.length === 1)?.text || "字");
+    return fitFontSize(ctx, sample, Math.max(maxW, 1) * 0.92, Math.max(maxH, 1) * 0.9);
   }
 
   function fitFontSize(ctx, text, maxW, maxH) {
@@ -213,13 +254,67 @@
     ctx.restore();
   }
 
+  function drawCharacters(ctx, lines) {
+    // Sample while the canvas is still the photo. The line quad is filled
+    // first so original strokes outside a narrow character box are covered.
+    // A character whose own background differs (a highlight) is filled again.
+    const jobs = [];
+    for (const line of lines) {
+      const characters = line.characters;
+      if (!characters?.length) continue;
+      const linePts = parseBox(line.box);
+      const lineBackground = linePts ? modeBackground(collectInterior(ctx, linePts)) : null;
+      const glyphs = [];
+      for (const character of characters) {
+        const pts = parseBox(character.box);
+        if (!pts) continue;
+        const geom = characterGeometry(pts);
+        if (geom.len < 1 || geom.ht < 1) continue;
+        const text = character.text ?? "";
+        const pixels = collectInterior(ctx, pts);
+        const background = modeBackground(pixels);
+        const ink = pickInkColor(pixels, background) ?? contrastInk(background);
+        glyphs.push({ pts, geom, text, blank: !text.trim(), background, ink });
+      }
+      jobs.push({ linePts, lineBackground, glyphs, size: sharedCharacterSize(ctx, glyphs) });
+    }
+    for (const job of jobs) {
+      if (job.linePts && job.lineBackground) fillQuad(ctx, job.linePts, job.lineBackground);
+      for (const glyph of job.glyphs) {
+        if (job.lineBackground && colorDist(
+          [glyph.background.r, glyph.background.g, glyph.background.b],
+          [job.lineBackground.r, job.lineBackground.g, job.lineBackground.b]) >= 24) {
+          fillQuad(ctx, glyph.pts, glyph.background);
+        }
+        if (glyph.blank) continue;
+        ctx.save();
+        ctx.translate(glyph.geom.cx, glyph.geom.cy);
+        ctx.rotate(glyph.geom.angle);
+        ctx.font = `bold ${job.size}px ${FONT_STACK}`;
+        ctx.fillStyle = cssRgb(glyph.ink);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(glyph.text, 0, 0);
+        ctx.restore();
+      }
+    }
+    for (const job of jobs) {
+      for (const glyph of job.glyphs) strokeQuad(ctx, glyph.pts, "#e10600", 1);
+    }
+  }
+
   function draw(ctx, image, lines, options) {
     if (!ctx || !image) return;
     const showOriginal = options?.showOriginal === true;
+    const showCharacters = options?.showCharacters === true;
     ctx.canvas.width = image.naturalWidth || image.width;
     ctx.canvas.height = image.naturalHeight || image.height;
     ctx.drawImage(image, 0, 0);
     if (showOriginal || !lines?.length) return;
+    if (showCharacters) {
+      drawCharacters(ctx, lines);
+      return;
+    }
     for (const line of lines) drawLine(ctx, line);
   }
 

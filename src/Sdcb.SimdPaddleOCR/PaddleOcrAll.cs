@@ -142,6 +142,17 @@ public sealed class PaddleOcrAll : IDisposable
     /// <summary>Runs DET, perspective crop, optional CLS and CTC REC.</summary>
     public PaddleOcrResult Run(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
+        => Run(source, sourceWidth, sourceHeight, returnCtcAlignment: false, sourceStride, format);
+
+    /// <summary>
+    /// Same as <see cref="Run(ReadOnlySpan{byte}, int, int, int, ImagePixelFormat)"/>.
+    /// <paramref name="returnCtcAlignment"/> asks this call's greedy decode to
+    /// keep one <see cref="PaddleOcrCtcSpan"/> per emitted token. It does not
+    /// change the graph, the session, or the tensor shape. False leaves
+    /// <see cref="PaddleOcrLine.CtcSpans"/> null and allocates no span array.
+    /// </summary>
+    public PaddleOcrResult Run(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        bool returnCtcAlignment, int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrAll));
         sourceStride = ImagePixels.ResolveStride(sourceWidth, sourceStride, format);
@@ -265,12 +276,12 @@ public sealed class PaddleOcrAll : IDisposable
             if (maxBatch > 1)
             {
                 ProcessLinesBatched(count, workerCount, maxBatch, cropBuffer, cropOffsets,
-                    cropBytes, cropWidths, cropHeights, detection.Boxes, lines);
+                    cropBytes, cropWidths, cropHeights, detection.Boxes, lines, returnCtcAlignment);
             }
             else if (workerCount <= 1)
             {
                 ProcessRange(0, count, 1, 0, recIntraOp, cropBuffer, cropOffsets, cropBytes,
-                    cropWidths, cropHeights, detection.Boxes, lines);
+                    cropWidths, cropHeights, detection.Boxes, lines, returnCtcAlignment);
             }
             else
             {
@@ -299,7 +310,7 @@ public sealed class PaddleOcrAll : IDisposable
                         while ((next = Interlocked.Increment(ref cursor)) < count)
                             ProcessOne(order[next], classifier, recognizer, recIntraOp,
                                 cropBuffer, cropOffsets, cropBytes,
-                                cropWidths, cropHeights, detection.Boxes, lines);
+                                cropWidths, cropHeights, detection.Boxes, lines, returnCtcAlignment);
                     });
                 }
                 finally
@@ -354,7 +365,7 @@ public sealed class PaddleOcrAll : IDisposable
     // is per-batch-element independent, so texts match the per-line path.
     private void ProcessLinesBatched(int count, int workerCount, int maxBatch, byte[] cropBuffer,
         int[] offsets, int[] bytes, int[] widths, int[] heights, PaddleOcrDetectionBox[] boxes,
-        PaddleOcrLine[] lines)
+        PaddleOcrLine[] lines, bool returnCtcAlignment)
     {
         uint[] labels = PooledArrays.Rent<uint>(count);
         float[] clsScores = PooledArrays.Rent<float>(count);
@@ -400,7 +411,8 @@ public sealed class PaddleOcrAll : IDisposable
             if (workerCount <= 1 || units.Count <= 1)
             {
                 foreach (int[] unit in units)
-                    RecognizeUnit(unit, unitIntraOp, cropBuffer, offsets, bytes, widths, heights, recWidths, recResults);
+                    RecognizeUnit(unit, unitIntraOp, cropBuffer, offsets, bytes, widths, heights, recWidths,
+                        recResults, returnCtcAlignment);
             }
             else
             {
@@ -408,22 +420,13 @@ public sealed class PaddleOcrAll : IDisposable
                 {
                     for (int u = worker; u < units.Count; u += workerCount)
                         RecognizeUnit(units[u], unitIntraOp, cropBuffer, offsets, bytes, widths, heights,
-                            recWidths, recResults);
+                            recWidths, recResults, returnCtcAlignment);
                 });
             }
 
             for (int i = 0; i < count; i++)
             {
-                lines[i] = new PaddleOcrLine
-                {
-                    Box = boxes[i],
-                    Text = recResults[i].Text,
-                    RecognitionScore = recResults[i].Score,
-                    ClassificationScore = clsScores[i],
-                    ClassificationLabel = labels[i],
-                    AppliedRotationDegrees = rotations[i],
-                    EmittedCount = (uint)recResults[i].EmittedCount
-                };
+                lines[i] = MakeLine(boxes[i], recResults[i], clsScores[i], labels[i], rotations[i]);
             }
         }
         finally
@@ -436,11 +439,12 @@ public sealed class PaddleOcrAll : IDisposable
     }
 
     private void RecognizeUnit(int[] unit, int intraOpThreads, byte[] cropBuffer, int[] offsets, int[] bytes,
-        int[] widths, int[] heights, int[] recWidths, PaddleOcrRecognitionResult[] recResults)
+        int[] widths, int[] heights, int[] recWidths, PaddleOcrRecognitionResult[] recResults,
+        bool returnCtcAlignment)
     {
         long recStart = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
         _recognizer.RecognizeBatch(cropBuffer, offsets, bytes, widths, heights, unit,
-            recWidths[unit[0]], recResults, intraOpThreads);
+            recWidths[unit[0]], recResults, intraOpThreads, returnCtcAlignment);
         if (s_profileEnabled) AddProfile(4, recStart);
     }
 
@@ -515,19 +519,19 @@ public sealed class PaddleOcrAll : IDisposable
 
     private void ProcessRange(int first, int count, int stride, int worker, int recIntraOp, byte[] cropBuffer,
         int[] offsets, int[] bytes, int[] widths, int[] heights, PaddleOcrDetectionBox[] boxes,
-        PaddleOcrLine[] lines)
+        PaddleOcrLine[] lines, bool returnCtcAlignment)
     {
         PaddleOcrClassifier? classifier = _classifier;
         PaddleOcrRecognizer recognizer = _recognizer;
         for (int i = first; i < count; i += stride)
             ProcessOne(i, classifier, recognizer, recIntraOp, cropBuffer, offsets, bytes, widths, heights,
-                boxes, lines);
+                boxes, lines, returnCtcAlignment);
     }
 
     private void ProcessOne(int i, PaddleOcrClassifier? classifier, PaddleOcrRecognizer recognizer,
         int recIntraOp, byte[] cropBuffer,
         int[] offsets, int[] bytes, int[] widths, int[] heights, PaddleOcrDetectionBox[] boxes,
-        PaddleOcrLine[] lines)
+        PaddleOcrLine[] lines, bool returnCtcAlignment)
     {
         ReadOnlySpan<byte> crop = cropBuffer.AsSpan(offsets[i], bytes[i]);
         uint label = 0;
@@ -548,19 +552,26 @@ public sealed class PaddleOcrAll : IDisposable
         }
         long recStart = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
         PaddleOcrRecognitionResult recognition = recognizer.Recognize(crop, widths[i], heights[i],
-            0, ImagePixelFormat.Bgr24, recIntraOp);
+            0, ImagePixelFormat.Bgr24, recIntraOp, returnCtcAlignment);
         if (s_profileEnabled) AddProfile(4, recStart);
-        lines[i] = new PaddleOcrLine
-        {
-            Box = boxes[i],
-            Text = recognition.Text,
-            RecognitionScore = recognition.Score,
-            ClassificationScore = clsScore,
-            ClassificationLabel = label,
-            AppliedRotationDegrees = rotation,
-            EmittedCount = (uint)recognition.EmittedCount
-        };
+        lines[i] = MakeLine(boxes[i], recognition, clsScore, label, rotation);
     }
+
+    private static PaddleOcrLine MakeLine(in PaddleOcrDetectionBox box, in PaddleOcrRecognitionResult recognition,
+        float classificationScore, uint classificationLabel, int rotation) => new PaddleOcrLine
+    {
+        Box = box,
+        Text = recognition.Text,
+        RecognitionScore = recognition.Score,
+        ClassificationScore = classificationScore,
+        ClassificationLabel = classificationLabel,
+        AppliedRotationDegrees = rotation,
+        EmittedCount = (uint)recognition.EmittedCount,
+        CtcSpans = recognition.CtcSpans,
+        RecognitionContentWidth = recognition.ResizedWidth,
+        RecognitionTensorWidth = recognition.TensorWidth,
+        RecognitionTimeSteps = recognition.TimeSteps
+    };
 
     // DET runs in an exclusive window before crop and line workers start, so
     // it always receives the same auto budget (up to 8 threads) regardless of

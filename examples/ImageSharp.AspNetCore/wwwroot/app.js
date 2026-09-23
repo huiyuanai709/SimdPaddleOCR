@@ -3,6 +3,7 @@ const sampleButton = document.querySelector("#sample");
 const fileName = document.querySelector("#fileName");
 const runButton = document.querySelector("#run");
 const showOriginal = document.querySelector("#showOriginal");
+const showCharacters = document.querySelector("#showCharacters");
 const canvas = document.querySelector("#canvas");
 const placeholder = document.querySelector("#placeholder");
 const drop = document.querySelector("#drop");
@@ -31,7 +32,9 @@ function updateCurl() {
   curl.textContent =
     `curl -X POST ${origin}/api/ocr \\\n` +
     `  -F "file=@image.jpg" \\\n` +
-    `  -F "model=${model}"\n\n` +
+    `  -F "model=${model}" \\\n` +
+    `  -F "characters=true"\n\n` +
+    `# characters 可选。不传则响应里没有单字框。\n\n` +
     `GET ${origin}/api/ocr/models\n` +
     `GET ${origin}/scalar`;
 }
@@ -54,7 +57,10 @@ function drawPreview(result) {
   if (!image) return;
   canvas.hidden = false;
   placeholder.hidden = true;
-  OcrOverlay.draw(ctx, image, result?.lines, { showOriginal: showOriginal.checked });
+  OcrOverlay.draw(ctx, image, result?.lines, {
+    showOriginal: showOriginal.checked,
+    showCharacters: showCharacters.checked,
+  });
 }
 
 function redraw() {
@@ -86,6 +92,7 @@ async function runOcr() {
   const form = new FormData();
   form.append("file", currentFile, currentFile.name || "image.jpg");
   form.append("model", model);
+  form.append("characters", "true");
   setBusy(true);
   setStatus("正在运行 OCR…");
   try {
@@ -138,6 +145,7 @@ sampleButton.addEventListener("click", () => loadRemoteImage(
 runButton.addEventListener("click", runOcr);
 document.querySelectorAll('input[name="model"]').forEach((el) => el.addEventListener("change", updateCurl));
 showOriginal.addEventListener("change", redraw);
+showCharacters.addEventListener("change", redraw);
 
 ["dragenter", "dragover"].forEach((eventName) => {
   drop.addEventListener(eventName, (event) => {

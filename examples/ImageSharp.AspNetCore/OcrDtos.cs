@@ -1,6 +1,10 @@
+using System.Text.Json.Serialization;
+
 namespace ImageSharp.AspNetCore;
 
 public sealed record OcrElapsedMs(double Decode, double Ocr, double Total);
+
+public sealed record OcrCharacterDto(string Text, float Score, float[][] Box);
 
 public sealed record OcrLineDto(
     string Text,
@@ -8,7 +12,11 @@ public sealed record OcrLineDto(
     float[][] Box,
     float DetectionScore,
     float ClassificationScore,
-    int AppliedRotationDegrees);
+    int AppliedRotationDegrees)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OcrCharacterDto[]? Characters { get; init; }
+}
 
 public sealed record OcrResponse(
     string Text,
