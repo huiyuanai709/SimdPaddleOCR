@@ -125,6 +125,17 @@ public sealed class PaddleOcrRecognizer : IDisposable
 
     public PaddleOcrRecognitionResult Recognize(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
         int sourceStride = 0, ImagePixelFormat format = ImagePixelFormat.Bgr24)
+        => Recognize(source, sourceWidth, sourceHeight, sourceStride, format, _compiled.IntraOpThreads);
+
+    /// <summary>
+    /// Per-call intra-op override for the line stage: callers that own idle
+    /// sibling workers (images whose line count is below the worker count)
+    /// pass a larger budget so the session shards its convolutions across
+    /// cores that would otherwise sit parked. Threading does not change any
+    /// arithmetic, so results are identical at any budget.
+    /// </summary>
+    internal PaddleOcrRecognitionResult Recognize(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, ImagePixelFormat format, int intraOpThreads)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrRecognizer));
         sourceStride = ImagePixels.ResolveStride(sourceWidth, sourceStride, format);
@@ -136,6 +147,9 @@ public sealed class PaddleOcrRecognizer : IDisposable
         if (profile) PipelineProfiler.Add(PipelineProfiler.RecCacheGet, t);
         t = profile ? PipelineProfiler.Now() : 0;
         InferenceSession session = RentSession(1, targetWidth);
+        // Rented sessions may carry a boosted budget from a previous pooled
+        // call; always rebind so the compiled default is the fallback.
+        session.IntraOpThreads = intraOpThreads;
         if (profile) PipelineProfiler.Add(PipelineProfiler.RecRent, t);
         t = profile ? PipelineProfiler.Now() : 0;
         session.Reshape([1, 3, 48, targetWidth]);
@@ -242,13 +256,14 @@ public sealed class PaddleOcrRecognizer : IDisposable
     /// </summary>
     internal void RecognizeBatch(byte[] cropBuffer, int[] offsets, int[] cropBytes,
         int[] widths, int[] heights, ReadOnlySpan<int> lineIndices, int targetWidth,
-        PaddleOcrRecognitionResult[] results)
+        PaddleOcrRecognitionResult[] results, int intraOpThreads)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrRecognizer));
         int n = lineIndices.Length;
         bool profile = PipelineProfiler.Enabled;
         long t = profile ? PipelineProfiler.Now() : 0;
         InferenceSession session = RentSession(n, targetWidth);
+        session.IntraOpThreads = intraOpThreads;
         if (profile) PipelineProfiler.Add(PipelineProfiler.RecRent, t);
         t = profile ? PipelineProfiler.Now() : 0;
         session.Reshape([n, 3, 48, targetWidth]);
@@ -324,7 +339,8 @@ public sealed class PaddleOcrRecognizer : IDisposable
             long matMulStarted = session.IsProfilingEnabled ? Stopwatch.GetTimestamp() : 0;
             if (MatMul.TryArgMax(ops.Activations, ops.Weights, ops.Bias,
                 indices.AsSpan(0, rowCount), scores.AsSpan(0, rowCount),
-                ops.Batch, ops.Rows, ops.Inner, ops.Columns, ops.PackedWeights))
+                ops.Batch, ops.Rows, ops.Inner, ops.Columns, ops.PackedWeights,
+                session.IntraOpThreads))
             {
                 if (matMulStarted != 0)
                     session.NoteProfile(OperatorId.MatMul, matMulStarted, ops.MatMulNodeIndex);

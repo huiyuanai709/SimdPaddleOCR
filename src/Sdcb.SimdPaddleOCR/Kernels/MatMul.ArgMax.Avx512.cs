@@ -19,30 +19,48 @@ internal static partial class MatMul
     private static unsafe void MatMulArgMaxPackedAvx512(ReadOnlySpan<float> input,
         ReadOnlySpan<float> weights, ReadOnlySpan<float> packedWeights,
         ReadOnlySpan<float> bias, Span<int> indices, Span<float> scores,
-        int batch, int rows, int inner, int columns)
+        int batch, int rows, int inner, int columns, int threads)
     {
-        fixed (float* inputPtr = input, weightsPtr = weights,
-            packedPtr = packedWeights, biasPtr = bias)
+        // rows % 8 == 0 (dispatch gate): per batch there are rows/16
+        // sixteen-row blocks plus at most one trailing eight-row block.
+        int full16 = rows / 16, tail8 = rows - full16 * 16 != 0 ? 1 : 0;
+        int rowJobs = full16 + tail8;
+        int jobs = checked(batch * rowJobs);
+        int workers = Math.Min(ArgMaxWorkers(batch, rows, inner, columns, threads), jobs);
+        bool hasBias = !bias.IsEmpty;
+        fixed (float* inputPin = input, weightsPin = weights,
+            packedPin = packedWeights, biasPin = bias)
+        fixed (int* indicesPin = indices)
+        fixed (float* scoresPin = scores)
         {
-            for (int b = 0; b < batch; b++)
+            float* inputPtr = inputPin, weightsPtr = weightsPin,
+                packedPtr = packedPin, biasPtr = biasPin;
+            int* indicesPtr = indicesPin;
+            float* scoresPtr = scoresPin;
+            void Worker(int w)
             {
-                int row = 0;
-                for (; row <= rows - 16; row += 16)
-                    MatMulArgMaxBlock16Avx512(inputPtr, weightsPtr, packedPtr,
-                        biasPtr, !bias.IsEmpty, indices, scores, b, row,
-                        rows, inner, columns);
-                if (row < rows)
-                    MatMulArgMaxBlock8Avx512(inputPtr, weightsPtr, packedPtr,
-                        biasPtr, !bias.IsEmpty, indices, scores, b, row,
-                        rows, inner, columns);
+                for (int job = w; job < jobs; job += workers)
+                {
+                    int b = job / rowJobs, j = job - b * rowJobs;
+                    if (j < full16)
+                        MatMulArgMaxBlock16Avx512(inputPtr, weightsPtr, packedPtr,
+                            biasPtr, hasBias, indicesPtr, scoresPtr, b, j * 16,
+                            rows, inner, columns);
+                    else
+                        MatMulArgMaxBlock8Avx512(inputPtr, weightsPtr, packedPtr,
+                            biasPtr, hasBias, indicesPtr, scoresPtr, b, full16 * 16,
+                            rows, inner, columns);
+                }
             }
+            if (workers > 1) Parallel.For(0, workers, Worker);
+            else Worker(0);
         }
     }
 
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void MatMulArgMaxBlock16Avx512(float* input,
         float* weights, float* packed, float* bias, bool hasBias,
-        Span<int> indices, Span<float> scores, int batch, int row,
+        int* indices, float* scores, int batch, int row,
         int rows, int inner, int columns)
     {
         Span<Vector512<float>> vectorMaxima = stackalloc Vector512<float>[16];
@@ -106,8 +124,8 @@ internal static partial class MatMul
             Update512(a14, col, 14, vectorMaxima, vectorIndices);
             Update512(a15, col, 15, vectorMaxima, vectorIndices);
         }
-        Span<float> maxima = stackalloc float[16];
-        Span<int> best = stackalloc int[16];
+        float* maxima = stackalloc float[16];
+        int* best = stackalloc int[16];
         Reduce512(vectorMaxima, vectorIndices, maxima, best);
         FinishScalarTail(input, weights, bias, hasBias, indices, scores,
             batch, row, 16, rows, inner, columns, col, maxima, best);
@@ -116,7 +134,7 @@ internal static partial class MatMul
     [MethodImpl(MethodImplCompat.AggressiveOptimization)]
     private static unsafe void MatMulArgMaxBlock8Avx512(float* input,
         float* weights, float* packed, float* bias, bool hasBias,
-        Span<int> indices, Span<float> scores, int batch, int row,
+        int* indices, float* scores, int batch, int row,
         int rows, int inner, int columns)
     {
         Span<Vector512<float>> vectorMaxima = stackalloc Vector512<float>[8];
@@ -158,8 +176,8 @@ internal static partial class MatMul
             Update512(a6, col, 6, vectorMaxima, vectorIndices);
             Update512(a7, col, 7, vectorMaxima, vectorIndices);
         }
-        Span<float> maxima = stackalloc float[8];
-        Span<int> best = stackalloc int[8];
+        float* maxima = stackalloc float[8];
+        int* best = stackalloc int[8];
         Reduce512(vectorMaxima, vectorIndices, maxima, best);
         FinishScalarTail(input, weights, bias, hasBias, indices, scores,
             batch, row, 8, rows, inner, columns, col, maxima, best);
@@ -177,8 +195,8 @@ internal static partial class MatMul
         indices[row] = Avx512F.BlendVariable(indices[row], candidate, replace);
     }
 
-    private static void Reduce512(ReadOnlySpan<Vector512<float>> vectorMaxima,
-        ReadOnlySpan<Vector512<float>> vectorIndices, Span<float> maxima, Span<int> best)
+    private static unsafe void Reduce512(ReadOnlySpan<Vector512<float>> vectorMaxima,
+        ReadOnlySpan<Vector512<float>> vectorIndices, float* maxima, int* best)
     {
         for (int row = 0; row < vectorMaxima.Length; row++)
         {

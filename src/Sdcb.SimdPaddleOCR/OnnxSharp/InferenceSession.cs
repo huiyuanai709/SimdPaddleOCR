@@ -31,7 +31,7 @@ public sealed partial class InferenceSession : IDisposable
     private readonly Model _model;
     private readonly TensorValue[] _tensors;
     private readonly int _inputIndex, _outputIndex;
-    private readonly int _intraOpThreads;
+    private int _intraOpThreads;
     private readonly ResizeWorkspace _resizeWorkspace = new();
     private NativeWorkspace? _workspace;
     private int _highWaterInputVolume;
@@ -77,6 +77,19 @@ public sealed partial class InferenceSession : IDisposable
     /// accepts logical NCHW and transposes at the entry.
     /// </summary>
     internal bool InputIsNhwc => _compiled.InputIsNhwc;
+
+    /// <summary>
+    /// Intra-op thread budget for the next run, defaulting to the compiled
+    /// model's value. A session is exclusively held by one inference at a
+    /// time, so a caller that owns idle sibling workers (images with fewer
+    /// lines than workers) may raise it per call without touching the shared
+    /// <see cref="CompiledModel"/>.
+    /// </summary>
+    internal int IntraOpThreads
+    {
+        get => _intraOpThreads;
+        set => _intraOpThreads = MathCompat.Clamp(value, 1, 16);
+    }
 
     /// <summary>
     /// Graph-input window inside the planned activation workspace (after

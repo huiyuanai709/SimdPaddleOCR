@@ -28,6 +28,8 @@ public sealed class PaddleOcrAll : IDisposable
     private readonly PaddleOcrOptions _options;
     private readonly int _lineWorkers;
     private readonly int _cropWorkers;
+    private readonly int _recIntraOpBase;
+    private readonly int _recIntraOpMax;
     private readonly List<byte[]> _cropBuffers = [];
     private readonly object _cropLock = new();
     private bool _disposed;
@@ -117,9 +119,15 @@ public sealed class PaddleOcrAll : IDisposable
         _detector = new PaddleOcrDetector(detectorModel ?? throw new ArgumentNullException(nameof(detectorModel)), _options.Detector,
             ResolveDetectorIntraThreads(_options));
         _classifier = classifierModel is null ? null : new PaddleOcrClassifier(classifierModel, _options.Classifier);
+        _recIntraOpBase = Parallelism.ResolveRecognizerIntraOp(_lineWorkers);
+        // Tail boost ceiling: CompiledModel clamps to 16 anyway. The NHWC
+        // kernels are FMA-bound and the detector measured faster at 16 than
+        // at 8 on Zen 3, so idle line-worker cores are worth feeding even
+        // past the physical-core count.
+        _recIntraOpMax = Math.Min(Environment.ProcessorCount, 16);
         _recognizer = new PaddleOcrRecognizer(recognizerModel ?? throw new ArgumentNullException(nameof(recognizerModel)),
             dictionaryUtf8, _options.Recognizer, ownsModel: false,
-            Parallelism.ResolveRecognizerIntraOp(_lineWorkers));
+            _recIntraOpBase);
     }
 
     private static byte[] ReadDictionary(Stream source)
@@ -249,6 +257,7 @@ public sealed class PaddleOcrAll : IDisposable
             stageStart = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
             pipelineStarted = pipelineProfile ? PipelineProfiler.Now() : 0;
             int workerCount = lineWorkerCount;
+            int recIntraOp = LineIntraOpBudget(count);
             // Same-width batched REC is opt-in: it is numerically exact, but
             // per-op whole-batch execution inflates the activation working set
             // and measured slower than per-line REC on desktop CPUs.
@@ -260,7 +269,7 @@ public sealed class PaddleOcrAll : IDisposable
             }
             else if (workerCount <= 1)
             {
-                ProcessRange(0, count, 1, 0, cropBuffer, cropOffsets, cropBytes,
+                ProcessRange(0, count, 1, 0, recIntraOp, cropBuffer, cropOffsets, cropBytes,
                     cropWidths, cropHeights, detection.Boxes, lines);
             }
             else
@@ -288,7 +297,8 @@ public sealed class PaddleOcrAll : IDisposable
                         PaddleOcrRecognizer recognizer = _recognizer;
                         int next;
                         while ((next = Interlocked.Increment(ref cursor)) < count)
-                            ProcessOne(order[next], classifier, recognizer, cropBuffer, cropOffsets, cropBytes,
+                            ProcessOne(order[next], classifier, recognizer, recIntraOp,
+                                cropBuffer, cropOffsets, cropBytes,
                                 cropWidths, cropHeights, detection.Boxes, lines);
                     });
                 }
@@ -382,17 +392,22 @@ public sealed class PaddleOcrAll : IDisposable
                 if (members.Count > 0)
                     units.Add([.. members]);
 
+            int unitWorkers = Math.Max(1, Math.Min(workerCount, units.Count));
+            // Idle workers' cores go to the units actually running: a single
+            // same-width group may shard across the whole machine.
+            int unitIntraOp = MathCompat.Clamp(_recIntraOpBase * _lineWorkers / unitWorkers,
+                _recIntraOpBase, _recIntraOpMax);
             if (workerCount <= 1 || units.Count <= 1)
             {
                 foreach (int[] unit in units)
-                    RecognizeUnit(unit, cropBuffer, offsets, bytes, widths, heights, recWidths, recResults);
+                    RecognizeUnit(unit, unitIntraOp, cropBuffer, offsets, bytes, widths, heights, recWidths, recResults);
             }
             else
             {
-                Parallel.For(0, Math.Min(workerCount, units.Count), worker =>
+                Parallel.For(0, unitWorkers, worker =>
                 {
                     for (int u = worker; u < units.Count; u += workerCount)
-                        RecognizeUnit(units[u], cropBuffer, offsets, bytes, widths, heights,
+                        RecognizeUnit(units[u], unitIntraOp, cropBuffer, offsets, bytes, widths, heights,
                             recWidths, recResults);
                 });
             }
@@ -420,12 +435,12 @@ public sealed class PaddleOcrAll : IDisposable
         }
     }
 
-    private void RecognizeUnit(int[] unit, byte[] cropBuffer, int[] offsets, int[] bytes,
+    private void RecognizeUnit(int[] unit, int intraOpThreads, byte[] cropBuffer, int[] offsets, int[] bytes,
         int[] widths, int[] heights, int[] recWidths, PaddleOcrRecognitionResult[] recResults)
     {
         long recStart = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
         _recognizer.RecognizeBatch(cropBuffer, offsets, bytes, widths, heights, unit,
-            recWidths[unit[0]], recResults);
+            recWidths[unit[0]], recResults, intraOpThreads);
         if (s_profileEnabled) AddProfile(4, recStart);
     }
 
@@ -485,18 +500,32 @@ public sealed class PaddleOcrAll : IDisposable
         }
     }
 
-    private void ProcessRange(int first, int count, int stride, int worker, byte[] cropBuffer,
+    // Intra-op budget shared by every REC run of one image: lines split the
+    // pool evenly, so the wave never oversubscribes (sessions in flight ×
+    // budget ≤ base × workers). Images with fewer lines than workers still
+    // hand the parked workers' cores to the sessions that do run; a static
+    // budget is used rather than tracking the scheduling tail because the
+    // per-line measurement showed no gain from boosting mid-drain.
+    // Per-element results are identical at any thread count.
+    private int LineIntraOpBudget(int lineCount)
+    {
+        int active = Math.Max(1, Math.Min(_lineWorkers, lineCount));
+        return MathCompat.Clamp(_recIntraOpBase * _lineWorkers / active, _recIntraOpBase, _recIntraOpMax);
+    }
+
+    private void ProcessRange(int first, int count, int stride, int worker, int recIntraOp, byte[] cropBuffer,
         int[] offsets, int[] bytes, int[] widths, int[] heights, PaddleOcrDetectionBox[] boxes,
         PaddleOcrLine[] lines)
     {
         PaddleOcrClassifier? classifier = _classifier;
         PaddleOcrRecognizer recognizer = _recognizer;
         for (int i = first; i < count; i += stride)
-            ProcessOne(i, classifier, recognizer, cropBuffer, offsets, bytes, widths, heights,
+            ProcessOne(i, classifier, recognizer, recIntraOp, cropBuffer, offsets, bytes, widths, heights,
                 boxes, lines);
     }
 
-    private void ProcessOne(int i, PaddleOcrClassifier? classifier, PaddleOcrRecognizer recognizer, byte[] cropBuffer,
+    private void ProcessOne(int i, PaddleOcrClassifier? classifier, PaddleOcrRecognizer recognizer,
+        int recIntraOp, byte[] cropBuffer,
         int[] offsets, int[] bytes, int[] widths, int[] heights, PaddleOcrDetectionBox[] boxes,
         PaddleOcrLine[] lines)
     {
@@ -518,7 +547,8 @@ public sealed class PaddleOcrAll : IDisposable
             }
         }
         long recStart = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
-        PaddleOcrRecognitionResult recognition = recognizer.Recognize(crop, widths[i], heights[i]);
+        PaddleOcrRecognitionResult recognition = recognizer.Recognize(crop, widths[i], heights[i],
+            0, ImagePixelFormat.Bgr24, recIntraOp);
         if (s_profileEnabled) AddProfile(4, recStart);
         lines[i] = new PaddleOcrLine
         {

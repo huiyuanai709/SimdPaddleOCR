@@ -18,18 +18,30 @@ internal static partial class MatMul
     private static unsafe void MatMulArgMaxPackedAvx(ReadOnlySpan<float> input,
         ReadOnlySpan<float> weights, ReadOnlySpan<float> packedWeights,
         ReadOnlySpan<float> bias, Span<int> indices, Span<float> scores,
-        int batch, int rows, int inner, int columns)
+        int batch, int rows, int inner, int columns, int threads)
     {
-        Span<Vector256<float>> vectorMaxima = stackalloc Vector256<float>[4];
-        Span<Vector256<float>> vectorIndices = stackalloc Vector256<float>[4];
-        Span<float> maxima = stackalloc float[4];
-        Span<int> best = stackalloc int[4];
-        fixed (float* inputPtr = input, weightsPtr = weights,
-            packedPtr = packedWeights, biasPtr = bias)
+        int rowJobs = rows / 4;
+        int jobs = checked(batch * rowJobs);
+        int workers = Math.Min(ArgMaxWorkers(batch, rows, inner, columns, threads), jobs);
+        bool hasBias = !bias.IsEmpty;
+        fixed (float* inputPin = input, weightsPin = weights,
+            packedPin = packedWeights, biasPin = bias)
+        fixed (int* indicesPin = indices)
+        fixed (float* scoresPin = scores)
         {
-            for (int b = 0; b < batch; b++)
-                for (int row = 0; row < rows; row += 4)
+            float* inputPtr = inputPin, weightsPtr = weightsPin,
+                packedPtr = packedPin, biasPtr = biasPin;
+            int* indicesPtr = indicesPin;
+            float* scoresPtr = scoresPin;
+            void Worker(int w)
+            {
+                Span<Vector256<float>> vectorMaxima = stackalloc Vector256<float>[4];
+                Span<Vector256<float>> vectorIndices = stackalloc Vector256<float>[4];
+                float* maxima = stackalloc float[4];
+                int* best = stackalloc int[4];
+                for (int job = w; job < jobs; job += workers)
                 {
+                    int b = job / rowJobs, row = (job - b * rowJobs) * 4;
                     vectorMaxima.Fill(Vector256.Create(float.NegativeInfinity));
                     int inputBase = (b * rows + row) * inner;
                     int col = 0;
@@ -53,7 +65,7 @@ internal static partial class MatMul
                             a2l = AddMul(a2l, v2, wl); a2h = AddMul(a2h, v2, wh);
                             a3l = AddMul(a3l, v3, wl); a3h = AddMul(a3h, v3, wh);
                         }
-                        if (!bias.IsEmpty)
+                        if (hasBias)
                         {
                             Vector256<float> bl = Avx.LoadVector256(biasPtr + col);
                             Vector256<float> bh = Avx.LoadVector256(biasPtr + col + 8);
@@ -72,10 +84,14 @@ internal static partial class MatMul
                         Update256(a3h, col + 8, 3, vectorMaxima, vectorIndices);
                     }
                     Reduce256(vectorMaxima, vectorIndices, maxima, best);
-                    FinishScalarTail(inputPtr, weightsPtr, biasPtr, !bias.IsEmpty,
-                        indices, scores, b, row, 4, rows, inner, columns, col,
+                    FinishScalarTail(inputPtr, weightsPtr, biasPtr, hasBias,
+                        indicesPtr, scoresPtr, b, row, 4, rows, inner, columns, col,
                         maxima, best);
                 }
+            }
+
+            if (workers > 1) Parallel.For(0, workers, Worker);
+            else Worker(0);
         }
     }
 
@@ -91,8 +107,8 @@ internal static partial class MatMul
         indices[row] = Avx.BlendVariable(indices[row], candidate, replace);
     }
 
-    private static void Reduce256(ReadOnlySpan<Vector256<float>> vectorMaxima,
-        ReadOnlySpan<Vector256<float>> vectorIndices, Span<float> maxima, Span<int> best)
+    private static unsafe void Reduce256(ReadOnlySpan<Vector256<float>> vectorMaxima,
+        ReadOnlySpan<Vector256<float>> vectorIndices, float* maxima, int* best)
     {
         for (int row = 0; row < vectorMaxima.Length; row++)
         {
