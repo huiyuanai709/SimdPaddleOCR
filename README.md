@@ -117,7 +117,7 @@ finally
 
 | NuGet 包                                        | 版本                                                                                                                                                                       | 说明                                                                           |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `Sdcb.SimdPaddleOCR`                            | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR)                                                       | 纯托管推理核心（`net10.0;netstandard2.0`）                                     |
+| `Sdcb.SimdPaddleOCR`                            | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR)                                                       | 纯托管推理核心（`net11.0;net10.0;netstandard2.0`）                                     |
 | `Sdcb.SimdPaddleOCR.ModelProvider`              | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.ModelProvider.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.ModelProvider)                           | 模型契约（`IPaddleOcrModelProvider` / `PaddleOcrModelBundle`），通常被传递引用 |
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny`       | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny)             | PP-OCRv6 tiny DET+REC+字典；`ChineseV6TinyModels.Default` 含 CLS               |
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Small`      | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small)           | PP-OCRv6 small；`ChineseV6SmallModels.Default`                                 |
@@ -196,7 +196,7 @@ ImageSharp 默认分配器会把像素拆成 4MB 块，大图上拿不到一整�
 
 |            | 说明                                                                                                                        |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------- |
-| 目标框架   | 核心 `net10.0;netstandard2.0`；`ModelProvider` 与全部模型包为 `netstandard2.0`                                              |
+| 目标框架   | 核心 `net11.0;net10.0;netstandard2.0`；`ModelProvider` 与全部模型包为 `netstandard2.0`                                              |
 | 推荐运行时 | .NET 10：完整 x86 SIMD 与 NativeAOT（`IsAotCompatible`）                                                                    |
 | 兼容运行时 | `netstandard2.0` 可在 .NET Framework 4.8 等环境使用；编译时去掉 AVX / AVX-512 / VNNI 源，走 `System.Numerics.Vector` / 标量 |
 | CI 架构    | Windows x64 / x86 / ARM64，Linux x64 / ARM64，macOS x64 / ARM64                                                             |

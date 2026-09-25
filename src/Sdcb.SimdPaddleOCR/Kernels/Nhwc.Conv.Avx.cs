@@ -59,19 +59,42 @@ internal static unsafe partial class Nhwc
         Avx.Store(output + 8, b);
     }
 
+    /// <summary>
+    /// Fused epilogue for one finished AVX2 tile. Kept out of <see cref="GemmTile16"/>
+    /// and <see cref="ConvTile16"/>: those methods already occupy every YMM, and an
+    /// inlined activation (GELU in particular) makes RyuJIT spill the accumulators
+    /// on every K step. Same store order as the old in-method <see cref="StoreRow"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void StoreEpilogue256(float* partial, int rows, float* output, int outStride,
+        float* residual, int resStride, NhwcActivation activation, float alphaScalar, float betaScalar,
+        float* biasAfter = null)
+    {
+        Vector256<float> alpha = Vector256.Create(alphaScalar), beta = Vector256.Create(betaScalar), one = Vector256.Create(1f);
+        for (int r = 0; r < rows; r++)
+        {
+            StoreRow(output + r * outStride,
+                Avx.LoadVector256(partial + r * OcBlock),
+                Avx.LoadVector256(partial + r * OcBlock + 8),
+                residual == null ? null : residual + r * resStride,
+                activation, alpha, beta, one, biasAfter);
+        }
+    }
+
     // ------------------------------------------------------------ micro-kernels
 
     /// <summary>
     /// Pointwise tile: <paramref name="rows"/> (1..6) consecutive pixels with
     /// stride <paramref name="inStride"/> floats, input channels
     /// [<paramref name="k0"/>, <paramref name="kEnd"/>) against the weight
-    /// panel <paramref name="w"/> ([k][16], already offset to k0). Partial sums
-    /// for non-final channel blocks live in <paramref name="partial"/>.
+    /// panel <paramref name="w"/> ([k][16], already offset to k0). Accumulators
+    /// always land in <paramref name="partial"/>; the caller runs
+    /// <see cref="StoreEpilogue256"/> after the last K block. NoInlining keeps
+    /// the epilogue from being compiled into this register-blocked loop.
     /// </summary>
-    [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    private static void GemmTile16(float* input, int rows, int inStride, float* w, int k0, int kEnd, int kTotal,
-        float* bias, float* output, int outStride, float* residual, int resStride,
-        NhwcActivation activation, float alphaScalar, float betaScalar, float* partial, float* biasAfter = null)
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static void GemmTile16(float* input, int rows, int inStride, float* w, int k0, int kEnd,
+        float* bias, float* partial)
     {
         float* p0 = input;
         float* p1 = p0 + (rows > 1 ? inStride : 0);
@@ -113,23 +136,12 @@ internal static unsafe partial class Nhwc
             a4 = Fma.MultiplyAdd(v4, w0, a4); b4 = Fma.MultiplyAdd(v4, w1, b4);
             a5 = Fma.MultiplyAdd(v5, w0, a5); b5 = Fma.MultiplyAdd(v5, w1, b5);
         }
-        if (kEnd < kTotal)
-        {
-            Avx.Store(partial, a0); Avx.Store(partial + 8, b0);
-            Avx.Store(partial + 16, a1); Avx.Store(partial + 24, b1);
-            Avx.Store(partial + 32, a2); Avx.Store(partial + 40, b2);
-            Avx.Store(partial + 48, a3); Avx.Store(partial + 56, b3);
-            Avx.Store(partial + 64, a4); Avx.Store(partial + 72, b4);
-            Avx.Store(partial + 80, a5); Avx.Store(partial + 88, b5);
-            return;
-        }
-        Vector256<float> alpha = Vector256.Create(alphaScalar), beta = Vector256.Create(betaScalar), one = Vector256.Create(1f);
-        StoreRow(output, a0, b0, residual, activation, alpha, beta, one, biasAfter);
-        if (rows > 1) StoreRow(output + outStride, a1, b1, residual == null ? null : residual + resStride, activation, alpha, beta, one, biasAfter);
-        if (rows > 2) StoreRow(output + 2 * outStride, a2, b2, residual == null ? null : residual + 2 * resStride, activation, alpha, beta, one, biasAfter);
-        if (rows > 3) StoreRow(output + 3 * outStride, a3, b3, residual == null ? null : residual + 3 * resStride, activation, alpha, beta, one, biasAfter);
-        if (rows > 4) StoreRow(output + 4 * outStride, a4, b4, residual == null ? null : residual + 4 * resStride, activation, alpha, beta, one, biasAfter);
-        if (rows > 5) StoreRow(output + 5 * outStride, a5, b5, residual == null ? null : residual + 5 * resStride, activation, alpha, beta, one, biasAfter);
+        Avx.Store(partial, a0); Avx.Store(partial + 8, b0);
+        Avx.Store(partial + 16, a1); Avx.Store(partial + 24, b1);
+        Avx.Store(partial + 32, a2); Avx.Store(partial + 40, b2);
+        Avx.Store(partial + 48, a3); Avx.Store(partial + 56, b3);
+        Avx.Store(partial + 64, a4); Avx.Store(partial + 72, b4);
+        Avx.Store(partial + 80, a5); Avx.Store(partial + 88, b5);
     }
 
     /// <summary>
@@ -141,11 +153,19 @@ internal static unsafe partial class Nhwc
     /// matching the reference summation order. Partial sums for non-final
     /// k-blocks live in <paramref name="partial"/>.
     /// </summary>
-    [MethodImpl(MethodImplCompat.AggressiveOptimization)]
-    private static void ConvTile16(float* p0, float* p1, float* p2, float* p3, float* p4, float* p5, int rows,
-        int* tapOffsets, int taps, float* w, int k0, int kEnd, int kTotal, float* bias,
-        float* output, int outStride, float* residual, int resStride,
-        NhwcActivation activation, float alphaScalar, float betaScalar, float* partial)
+    /// <summary>
+    /// Dense KxK tile: six output pixels whose receptive-field origins are
+    /// <paramref name="p0"/>..<paramref name="p5"/>; <paramref name="tapOffsets"/>
+    /// gives the float offset of every tap relative to the origin. Weights are
+    /// [ic][tap][16] (already offset to <paramref name="k0"/>); the flattened
+    /// reduction index k = ic * taps + tap runs input channels then taps,
+    /// matching the reference summation order. Accumulators always land in
+    /// <paramref name="partial"/>; the caller runs <see cref="StoreEpilogue256"/>
+    /// after the last K block. Same NoInlining rationale as <see cref="GemmTile16"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static void ConvTile16(float* p0, float* p1, float* p2, float* p3, float* p4, float* p5,
+        int* tapOffsets, int taps, float* w, int k0, int kEnd, float* bias, float* partial)
     {
         Vector256<float> a0, a1, a2, a3, a4, a5, b0, b1, b2, b3, b4, b5;
         if (k0 == 0)
@@ -184,23 +204,12 @@ internal static unsafe partial class Nhwc
             a5 = Fma.MultiplyAdd(v5, w0, a5); b5 = Fma.MultiplyAdd(v5, w1, b5);
             if (++tap == taps) { tap = 0; ci++; }
         }
-        if (kEnd < kTotal)
-        {
-            Avx.Store(partial, a0); Avx.Store(partial + 8, b0);
-            Avx.Store(partial + 16, a1); Avx.Store(partial + 24, b1);
-            Avx.Store(partial + 32, a2); Avx.Store(partial + 40, b2);
-            Avx.Store(partial + 48, a3); Avx.Store(partial + 56, b3);
-            Avx.Store(partial + 64, a4); Avx.Store(partial + 72, b4);
-            Avx.Store(partial + 80, a5); Avx.Store(partial + 88, b5);
-            return;
-        }
-        Vector256<float> alpha = Vector256.Create(alphaScalar), beta = Vector256.Create(betaScalar), one = Vector256.Create(1f);
-        StoreRow(output, a0, b0, residual, activation, alpha, beta, one);
-        if (rows > 1) StoreRow(output + outStride, a1, b1, residual == null ? null : residual + resStride, activation, alpha, beta, one);
-        if (rows > 2) StoreRow(output + 2 * outStride, a2, b2, residual == null ? null : residual + 2 * resStride, activation, alpha, beta, one);
-        if (rows > 3) StoreRow(output + 3 * outStride, a3, b3, residual == null ? null : residual + 3 * resStride, activation, alpha, beta, one);
-        if (rows > 4) StoreRow(output + 4 * outStride, a4, b4, residual == null ? null : residual + 4 * resStride, activation, alpha, beta, one);
-        if (rows > 5) StoreRow(output + 5 * outStride, a5, b5, residual == null ? null : residual + 5 * resStride, activation, alpha, beta, one);
+        Avx.Store(partial, a0); Avx.Store(partial + 8, b0);
+        Avx.Store(partial + 16, a1); Avx.Store(partial + 24, b1);
+        Avx.Store(partial + 32, a2); Avx.Store(partial + 40, b2);
+        Avx.Store(partial + 48, a3); Avx.Store(partial + 56, b3);
+        Avx.Store(partial + 64, a4); Avx.Store(partial + 72, b4);
+        Avx.Store(partial + 80, a5); Avx.Store(partial + 88, b5);
     }
 
     // --------------------------------------------------------------- pointwise
@@ -272,9 +281,11 @@ internal static unsafe partial class Nhwc
                                         int rows = Math.Min(TileRows, pixels - pixel);
                                         float* outTile = outBase + (long)pixel * outputChannels + oc;
                                         float* resTile = resBase == null ? null : resBase + (long)pixel * outputChannels + oc;
-                                        GemmTile16(inBase + (long)pixel * inputChannels, rows, inputChannels, wk, k0, kEnd,
-                                            inputChannels, b, outTile, outputChannels, resTile, outputChannels,
-                                            activation, alpha, beta, partial + (tile - tileFrom) * PartialFloats);
+                                        float* part = partial + (tile - tileFrom) * PartialFloats;
+                                        GemmTile16(inBase + (long)pixel * inputChannels, rows, inputChannels, wk, k0, kEnd, b, part);
+                                        if (kEnd == inputChannels)
+                                            StoreEpilogue256(part, rows, outTile, outputChannels, resTile, outputChannels,
+                                                activation, alpha, beta);
                                     }
                                 }
                             }
@@ -406,9 +417,11 @@ internal static unsafe partial class Nhwc
                                         float* p3 = p2 + (rows > 3 ? pixelStride : 0);
                                         float* p4 = p3 + (rows > 4 ? pixelStride : 0);
                                         float* p5 = p4 + (rows > 5 ? pixelStride : 0);
-                                        ConvTile16(p0, p1, p2, p3, p4, p5, rows, tapOffsets, taps, wk, k0, kEnd, kTotal, bb,
-                                            outTile, outputChannels, resTile, outputChannels, activation, alpha, beta,
-                                            partial + xTile * PartialFloats);
+                                        float* part = partial + xTile * PartialFloats;
+                                        ConvTile16(p0, p1, p2, p3, p4, p5, tapOffsets, taps, wk, k0, kEnd, bb, part);
+                                        if (kEnd == kTotal)
+                                            StoreEpilogue256(part, rows, outTile, outputChannels, resTile, outputChannels,
+                                                activation, alpha, beta);
                                     }
                                 }
                                 // Border tiles: gathered zero-padded patch, full reduction in one pass.
@@ -427,8 +440,9 @@ internal static unsafe partial class Nhwc
                                     float* p3 = p2 + (rows > 3 ? pixelStride : 0);
                                     float* p4 = p3 + (rows > 4 ? pixelStride : 0);
                                     float* p5 = p4 + (rows > 5 ? pixelStride : 0);
-                                    ConvTile16(p0, p1, p2, p3, p4, p5, rows, patchOffsets, taps, w, 0, kTotal, kTotal, bb,
-                                        outTile, outputChannels, resTile, outputChannels, activation, alpha, beta, partial);
+                                    ConvTile16(p0, p1, p2, p3, p4, p5, patchOffsets, taps, w, 0, kTotal, bb, partial);
+                                    StoreEpilogue256(partial, rows, outTile, outputChannels, resTile, outputChannels,
+                                        activation, alpha, beta);
                                 }
                             }
                         }
@@ -503,9 +517,10 @@ internal static unsafe partial class Nhwc
                             {
                                 int x0 = xTile * TileRows;
                                 int rows = Math.Min(TileRows, width - x0);
-                                GemmTile16(inRow + (long)x0 * inputChannels, rows, inputChannels, w, 0, inputChannels, inputChannels,
-                                    null, outRow + (long)(2 * x0) * outputChannels + ocBlock * OcBlock, 2 * outputChannels,
-                                    null, 0, activation, 0f, 0f, partial, bb);
+                                GemmTile16(inRow + (long)x0 * inputChannels, rows, inputChannels, w, 0, inputChannels, null, partial);
+                                StoreEpilogue256(partial, rows,
+                                    outRow + (long)(2 * x0) * outputChannels + ocBlock * OcBlock, 2 * outputChannels,
+                                    null, 0, activation, 0f, 0f, bb);
                             }
                         }
                     }

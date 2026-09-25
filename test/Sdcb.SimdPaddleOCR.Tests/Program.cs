@@ -25,6 +25,8 @@ if (args[0] == "--summarize")
     return BenchSummary.Compare(args.Skip(1).ToArray());
 if (args[0] == "--kernel-bench")
     return KernelBench.Run(args);
+if (args[0] == "--concurrent-bench")
+    return ConcurrentBench.Run(args);
 
 int workers = 4;
 string modelType = "tiny";
