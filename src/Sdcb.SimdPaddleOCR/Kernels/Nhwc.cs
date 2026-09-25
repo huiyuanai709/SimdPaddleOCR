@@ -55,7 +55,10 @@ internal static unsafe partial class Nhwc
         NhwcActivation activation, float alpha, float beta, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Avx512F.IsSupported)
+        // An 8-channel tail (OC % 16 == 8) stays on the AVX2 kernel. The
+        // AVX-512 tile is 16-wide; sending it an 8-channel panel used to
+        // force a full-resolution NCHW detour in the detector stem.
+        if (Avx512F.IsSupported && (outputChannels & 15) == 0)
             Pointwise512(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
                 residual, activation, alpha, beta, threads);
         else if (Avx2.IsSupported && Fma.IsSupported)
@@ -85,7 +88,7 @@ internal static unsafe partial class Nhwc
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
     {
 #if !NETSTANDARD2_0
-        if (Avx512F.IsSupported)
+        if (Avx512F.IsSupported && (outputChannels & 15) == 0)
             Dense512(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
                 outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
                 residual, activation, alpha, beta, threads);
@@ -296,7 +299,11 @@ internal static unsafe partial class Nhwc
             BatchNormScalar(input, output, pixels, channels, scale, bias, mean, variance, epsilon);
     }
 
-    /// <summary>Packs dense [oc][ic][kh][kw] weights as [oc/16][ic][tap][16].</summary>
+    /// <summary>
+    /// Packs dense [oc][ic][kh][kw] weights as [oc/16][ic][tap][16], plus a
+    /// trailing [ic][tap][8] panel when <paramref name="outputChannels"/> is
+    /// 8 mod 16. Multiples of 16 keep the original panel layout.
+    /// </summary>
     internal static float[] PackDense(ReadOnlySpan<float> weights, int outputChannels, int inputChannels, int taps)
     {
         const int block16 = OutputChannelBlock;
@@ -310,6 +317,18 @@ internal static unsafe partial class Nhwc
                     for (int lane = 0; lane < block16; lane++)
                         packed[dst + lane] = weights[((block * block16 + lane) * inputChannels + ci) * taps + tap];
                 }
+        if ((outputChannels & 8) != 0)
+        {
+            int oc0 = blocks * block16;
+            long tail = (long)blocks * inputChannels * taps * block16;
+            for (int ci = 0; ci < inputChannels; ci++)
+                for (int tap = 0; tap < taps; tap++)
+                {
+                    long dst = tail + ((long)ci * taps + tap) * 8;
+                    for (int lane = 0; lane < 8; lane++)
+                        packed[dst + lane] = weights[((oc0 + lane) * inputChannels + ci) * taps + tap];
+                }
+        }
         return packed;
     }
 

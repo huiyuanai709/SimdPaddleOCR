@@ -117,8 +117,8 @@ internal static unsafe partial class Nhwc
         Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
         NhwcActivation activation, float alpha, float beta, int threads)
     {
-        if ((outputChannels & 15) != 0 || outputChannels <= 0 || inputChannels <= 0)
-            throw new ArgumentException("NHWC pointwise requires output channels to be a multiple of 16.");
+        if (outputChannels < 8 || (outputChannels & 7) != 0 || inputChannels <= 0)
+            throw new ArgumentException("NHWC pointwise requires output channels to be a multiple of 8.");
         if (input.Length < (long)pixels * inputChannels || output.Length < (long)pixels * outputChannels ||
             packedWeights.Length < (long)inputChannels * outputChannels ||
             (!bias.IsEmpty && bias.Length < outputChannels) ||
@@ -189,9 +189,15 @@ internal static unsafe partial class Nhwc
                     ArrayPool<float>.Shared.Return(partialArray);
                 }
             }
-            if (workers > 1) Parallel.For(0, workers, Worker);
-            else Worker(0);
+            if ((outputChannels >> 4) > 0)
+            {
+                if (workers > 1) Parallel.For(0, workers, Worker);
+                else Worker(0);
+            }
         }
+        if ((outputChannels & 8) != 0)
+            PointwiseTail8Scalar(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
+                residual, activation, alpha, beta, threads);
     }
 
     internal static void DenseScalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
@@ -200,7 +206,7 @@ internal static unsafe partial class Nhwc
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
     {
         int taps = kernelH * kernelW;
-        if ((outputChannels & 15) != 0 || outputChannels <= 0 || inputChannels <= 0 || taps <= 0 || strideH <= 0 || strideW <= 0)
+        if (outputChannels < 8 || (outputChannels & 7) != 0 || inputChannels <= 0 || taps <= 0 || strideH <= 0 || strideW <= 0)
             throw new ArgumentException("NHWC dense convolution shape is not supported.");
         long inVolume = (long)batch * height * width * inputChannels, outVolume = (long)batch * outputHeight * outputWidth * outputChannels;
         if (input.Length < inVolume || output.Length < outVolume ||
@@ -324,6 +330,128 @@ internal static unsafe partial class Nhwc
                     ArrayPool<int>.Shared.Return(tapArray);
                     ArrayPool<float>.Shared.Return(patchArray);
                     ArrayPool<float>.Shared.Return(partialArray);
+                }
+            }
+            if ((outputChannels >> 4) > 0)
+            {
+                if (workers > 1) Parallel.For(0, workers, Worker);
+                else Worker(0);
+            }
+        }
+        if ((outputChannels & 8) != 0)
+            DenseTail8Scalar(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
+                outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
+                residual, activation, alpha, beta, threads);
+    }
+
+    private static void PointwiseTail8Scalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+        Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
+        NhwcActivation activation, float alpha, float beta, int threads)
+    {
+        int oc0 = outputChannels & ~15;
+        int workers = threads > 1 && (long)pixels * inputChannels >= 2_000_000 ? Math.Min(threads, pixels) : 1;
+        fixed (float* inPtr = input, wPtr = packedWeights, bPtr = bias, outPtr = output, rPtr = residual)
+        {
+            nint inA = (nint)inPtr, wA = (nint)(wPtr + (long)(outputChannels >> 4) * inputChannels * OcBlock);
+            nint bA = (nint)bPtr, outA = (nint)outPtr, rA = (nint)rPtr;
+            bool hasBias = !bias.IsEmpty, hasResidual = !residual.IsEmpty;
+            void Worker(int worker)
+            {
+                int begin = (int)((long)pixels * worker / workers);
+                int end = (int)((long)pixels * (worker + 1) / workers);
+                float* wTail = (float*)wA;
+                float* inBase = (float*)inA, outBase = (float*)outA, biasBase = (float*)bA, resBase = (float*)rA;
+                for (int pixel = begin; pixel < end; pixel++)
+                {
+                    float a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0;
+                    if (hasBias)
+                    {
+                        float* b = biasBase + oc0;
+                        a0 = b[0]; a1 = b[1]; a2 = b[2]; a3 = b[3]; a4 = b[4]; a5 = b[5]; a6 = b[6]; a7 = b[7];
+                    }
+                    float* pix = inBase + (long)pixel * inputChannels;
+                    float* w = wTail;
+                    for (int k = 0; k < inputChannels; k++, w += 8)
+                    {
+                        float v = pix[k];
+                        a0 += v * w[0]; a1 += v * w[1]; a2 += v * w[2]; a3 += v * w[3];
+                        a4 += v * w[4]; a5 += v * w[5]; a6 += v * w[6]; a7 += v * w[7];
+                    }
+                    float* dst = outBase + (long)pixel * outputChannels + oc0;
+                    float* res = hasResidual ? resBase + (long)pixel * outputChannels + oc0 : null;
+                    dst[0] = ActivateScalarValue(a0 + (res == null ? 0 : res[0]), activation, alpha, beta);
+                    dst[1] = ActivateScalarValue(a1 + (res == null ? 0 : res[1]), activation, alpha, beta);
+                    dst[2] = ActivateScalarValue(a2 + (res == null ? 0 : res[2]), activation, alpha, beta);
+                    dst[3] = ActivateScalarValue(a3 + (res == null ? 0 : res[3]), activation, alpha, beta);
+                    dst[4] = ActivateScalarValue(a4 + (res == null ? 0 : res[4]), activation, alpha, beta);
+                    dst[5] = ActivateScalarValue(a5 + (res == null ? 0 : res[5]), activation, alpha, beta);
+                    dst[6] = ActivateScalarValue(a6 + (res == null ? 0 : res[6]), activation, alpha, beta);
+                    dst[7] = ActivateScalarValue(a7 + (res == null ? 0 : res[7]), activation, alpha, beta);
+                }
+            }
+            if (workers > 1) Parallel.For(0, workers, Worker);
+            else Worker(0);
+        }
+    }
+
+    private static void DenseTail8Scalar(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+        Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
+        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
+        ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
+    {
+        int taps = kernelH * kernelW;
+        int oc0 = outputChannels & ~15;
+        int rowsTotal = batch * outputHeight;
+        int workers = threads > 1 && (long)rowsTotal * outputWidth * inputChannels * taps >= 2_000_000
+            ? Math.Min(threads, rowsTotal) : 1;
+        fixed (float* inPtr = input, wPtr = packedWeights, bPtr = bias, outPtr = output, rPtr = residual)
+        {
+            nint inA = (nint)inPtr, wA = (nint)(wPtr + (long)(outputChannels >> 4) * inputChannels * taps * OcBlock);
+            nint bA = (nint)bPtr, outA = (nint)outPtr, rA = (nint)rPtr;
+            bool hasBias = !bias.IsEmpty, hasResidual = !residual.IsEmpty;
+            int rowStride = width * inputChannels;
+            void Worker(int worker)
+            {
+                int rowBegin = (int)((long)rowsTotal * worker / workers);
+                int rowEnd = (int)((long)rowsTotal * (worker + 1) / workers);
+                float* wTail = (float*)wA;
+                float* inBase = (float*)inA, outBase = (float*)outA, biasBase = (float*)bA, resBase = (float*)rA;
+                for (int row = rowBegin; row < rowEnd; row++)
+                {
+                    int b = row / outputHeight, y = row - b * outputHeight;
+                    float* inBatch = inBase + (long)b * height * rowStride;
+                    for (int x = 0; x < outputWidth; x++)
+                    {
+                        float a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0;
+                        if (hasBias)
+                        {
+                            float* bv = biasBase + oc0;
+                            a0 = bv[0]; a1 = bv[1]; a2 = bv[2]; a3 = bv[3]; a4 = bv[4]; a5 = bv[5]; a6 = bv[6]; a7 = bv[7];
+                        }
+                        float* w = wTail;
+                        for (int ci = 0; ci < inputChannels; ci++)
+                            for (int ky = 0; ky < kernelH; ky++)
+                                for (int kx = 0; kx < kernelW; kx++, w += 8)
+                                {
+                                    int iy = y * strideH - padTop + ky;
+                                    int ix = x * strideW - padLeft + kx;
+                                    if ((uint)iy >= (uint)height || (uint)ix >= (uint)width) continue;
+                                    float v = inBatch[((long)iy * width + ix) * inputChannels + ci];
+                                    a0 += v * w[0]; a1 += v * w[1]; a2 += v * w[2]; a3 += v * w[3];
+                                    a4 += v * w[4]; a5 += v * w[5]; a6 += v * w[6]; a7 += v * w[7];
+                                }
+                        long pix = ((long)b * outputHeight + y) * outputWidth + x;
+                        float* dst = outBase + pix * outputChannels + oc0;
+                        float* res = hasResidual ? resBase + pix * outputChannels + oc0 : null;
+                        dst[0] = ActivateScalarValue(a0 + (res == null ? 0 : res[0]), activation, alpha, beta);
+                        dst[1] = ActivateScalarValue(a1 + (res == null ? 0 : res[1]), activation, alpha, beta);
+                        dst[2] = ActivateScalarValue(a2 + (res == null ? 0 : res[2]), activation, alpha, beta);
+                        dst[3] = ActivateScalarValue(a3 + (res == null ? 0 : res[3]), activation, alpha, beta);
+                        dst[4] = ActivateScalarValue(a4 + (res == null ? 0 : res[4]), activation, alpha, beta);
+                        dst[5] = ActivateScalarValue(a5 + (res == null ? 0 : res[5]), activation, alpha, beta);
+                        dst[6] = ActivateScalarValue(a6 + (res == null ? 0 : res[6]), activation, alpha, beta);
+                        dst[7] = ActivateScalarValue(a7 + (res == null ? 0 : res[7]), activation, alpha, beta);
+                    }
                 }
             }
             if (workers > 1) Parallel.For(0, workers, Worker);

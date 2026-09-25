@@ -233,7 +233,22 @@ internal static class LayoutPlanner
                     int dh = I32(p, 24), dw = I32(p, 28), kh = I32(p, 8), kw = I32(p, 12);
                     if (dh != 1 || dw != 1 || kh != w[2] || kw != w[3] || kh <= 0 || kw <= 0) return false;
                     if (I32(p, 16) <= 0 || I32(p, 20) <= 0) return false;
-                    if (group == 1) return w[0] >= 16 && (w[0] & 15) == 0;
+                    if (group == 1)
+                    {
+                        if (w[0] >= 16 && (w[0] & 15) == 0) return true;
+                        // 8-channel tail. Keeps the detector's 16→8 2×2 on the
+                        // channels-last path so the full-resolution map is not
+                        // transposed out and back. AVX2+FMA only: the tail
+                        // kernel is the YMM one, and AdvSIMD stays on the
+                        // 16-wide rule so NEON does not pick up a slower path.
+#if !NETSTANDARD2_0
+                        return w[0] >= 8 && (w[0] & 7) == 0 &&
+                            System.Runtime.Intrinsics.X86.Avx2.IsSupported &&
+                            System.Runtime.Intrinsics.X86.Fma.IsSupported;
+#else
+                        return false;
+#endif
+                    }
                     // Depthwise: one input channel per group, one output per group.
                     return w[1] == 1 && w[0] == group && (group & 7) == 0;
                 }
