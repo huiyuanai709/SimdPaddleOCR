@@ -212,6 +212,83 @@ internal static unsafe partial class Nhwc
         Avx.Store(partial + 80, a5); Avx.Store(partial + 88, b5);
     }
 
+    /// <summary>
+    /// Interior tiles of one output row, same FMA order as <see cref="ConvTile16"/>
+    /// called once per tile. The epilogue stays a separate method so the 12
+    /// accumulators are not spilled across K.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static void ConvInteriorTiles16(float* inBatch, int iy0, int rowStride, int tileBegin, int tileEnd,
+        int outputWidth, int strideW, int padLeft, int pixelStride, int* tapOffsets, int taps, float* wPanel,
+        int k0, int kEnd, float* bias, float* partial, float* outRow, float* resRow, int outputChannels, int oc,
+        bool epilogue, NhwcActivation activation, float alpha, float beta)
+    {
+        for (int xTile = tileBegin; xTile < tileEnd; xTile++)
+        {
+            int x0 = xTile * TileRows;
+            int rows = Math.Min(TileRows, outputWidth - x0);
+            int ix0 = x0 * strideW - padLeft;
+            int inputChannels = pixelStride / strideW;
+            float* p0 = inBatch + (long)iy0 * rowStride + (long)ix0 * inputChannels;
+            float* p1 = p0 + (rows > 1 ? pixelStride : 0);
+            float* p2 = p1 + (rows > 2 ? pixelStride : 0);
+            float* p3 = p2 + (rows > 3 ? pixelStride : 0);
+            float* p4 = p3 + (rows > 4 ? pixelStride : 0);
+            float* p5 = p4 + (rows > 5 ? pixelStride : 0);
+            float* part = partial + (long)xTile * PartialFloats;
+            float* w = wPanel;
+            Vector256<float> a0, a1, a2, a3, a4, a5, b0, b1, b2, b3, b4, b5;
+            if (k0 == 0)
+            {
+                Vector256<float> biasLow = bias == null ? Vector256<float>.Zero : Avx.LoadVector256(bias);
+                Vector256<float> biasHigh = bias == null ? Vector256<float>.Zero : Avx.LoadVector256(bias + 8);
+                a0 = a1 = a2 = a3 = a4 = a5 = biasLow;
+                b0 = b1 = b2 = b3 = b4 = b5 = biasHigh;
+            }
+            else
+            {
+                a0 = Avx.LoadVector256(part); b0 = Avx.LoadVector256(part + 8);
+                a1 = Avx.LoadVector256(part + 16); b1 = Avx.LoadVector256(part + 24);
+                a2 = Avx.LoadVector256(part + 32); b2 = Avx.LoadVector256(part + 40);
+                a3 = Avx.LoadVector256(part + 48); b3 = Avx.LoadVector256(part + 56);
+                a4 = Avx.LoadVector256(part + 64); b4 = Avx.LoadVector256(part + 72);
+                a5 = Avx.LoadVector256(part + 80); b5 = Avx.LoadVector256(part + 88);
+            }
+            int ci = k0 / taps, tap = k0 - ci * taps;
+            for (int k = k0; k < kEnd; k++, w += 16)
+            {
+                int offset = tapOffsets[tap] + ci;
+                Vector256<float> w0 = Avx.LoadVector256(w);
+                Vector256<float> w1 = Avx.LoadVector256(w + 8);
+                Vector256<float> v0 = Avx.BroadcastScalarToVector256(p0 + offset);
+                Vector256<float> v1 = Avx.BroadcastScalarToVector256(p1 + offset);
+                a0 = Fma.MultiplyAdd(v0, w0, a0); b0 = Fma.MultiplyAdd(v0, w1, b0);
+                a1 = Fma.MultiplyAdd(v1, w0, a1); b1 = Fma.MultiplyAdd(v1, w1, b1);
+                Vector256<float> v2 = Avx.BroadcastScalarToVector256(p2 + offset);
+                Vector256<float> v3 = Avx.BroadcastScalarToVector256(p3 + offset);
+                a2 = Fma.MultiplyAdd(v2, w0, a2); b2 = Fma.MultiplyAdd(v2, w1, b2);
+                a3 = Fma.MultiplyAdd(v3, w0, a3); b3 = Fma.MultiplyAdd(v3, w1, b3);
+                Vector256<float> v4 = Avx.BroadcastScalarToVector256(p4 + offset);
+                Vector256<float> v5 = Avx.BroadcastScalarToVector256(p5 + offset);
+                a4 = Fma.MultiplyAdd(v4, w0, a4); b4 = Fma.MultiplyAdd(v4, w1, b4);
+                a5 = Fma.MultiplyAdd(v5, w0, a5); b5 = Fma.MultiplyAdd(v5, w1, b5);
+                if (++tap == taps) { tap = 0; ci++; }
+            }
+            Avx.Store(part, a0); Avx.Store(part + 8, b0);
+            Avx.Store(part + 16, a1); Avx.Store(part + 24, b1);
+            Avx.Store(part + 32, a2); Avx.Store(part + 40, b2);
+            Avx.Store(part + 48, a3); Avx.Store(part + 56, b3);
+            Avx.Store(part + 64, a4); Avx.Store(part + 72, b4);
+            Avx.Store(part + 80, a5); Avx.Store(part + 88, b5);
+            if (epilogue)
+            {
+                float* outTile = outRow + (long)x0 * outputChannels + oc;
+                float* resTile = resRow == null ? null : resRow + (long)x0 * outputChannels + oc;
+                StoreEpilogue256(part, rows, outTile, outputChannels, resTile, outputChannels, activation, alpha, beta);
+            }
+        }
+    }
+
     // --------------------------------------------------------------- pointwise
 
     /// <summary>
@@ -222,8 +299,8 @@ internal static unsafe partial class Nhwc
         Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
         NhwcActivation activation, float alpha, float beta, int threads)
     {
-        if ((outputChannels & 15) != 0 || outputChannels <= 0 || inputChannels <= 0)
-            throw new ArgumentException("NHWC pointwise requires output channels to be a multiple of 16.");
+        if (outputChannels < 8 || (outputChannels & 7) != 0 || inputChannels <= 0)
+            throw new ArgumentException("NHWC pointwise requires output channels to be a multiple of 8.");
         if (input.Length < (long)pixels * inputChannels || output.Length < (long)pixels * outputChannels ||
             packedWeights.Length < (long)inputChannels * outputChannels ||
             (!bias.IsEmpty && bias.Length < outputChannels) ||
@@ -297,9 +374,15 @@ internal static unsafe partial class Nhwc
                     ArrayPool<float>.Shared.Return(partialArray);
                 }
             }
-            if (workers > 1) Parallel.For(0, workers, Worker);
-            else Worker(0);
+            if ((outputChannels >> 4) > 0)
+            {
+                if (workers > 1) Parallel.For(0, workers, Worker);
+                else Worker(0);
+            }
         }
+        if ((outputChannels & 8) != 0)
+            PointwiseTail8Avx(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
+                residual, activation, alpha, beta, threads);
     }
 
     // ------------------------------------------------------------------- dense
@@ -315,7 +398,7 @@ internal static unsafe partial class Nhwc
         ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
     {
         int taps = kernelH * kernelW;
-        if ((outputChannels & 15) != 0 || outputChannels <= 0 || inputChannels <= 0 || taps <= 0 || strideH <= 0 || strideW <= 0)
+        if (outputChannels < 8 || (outputChannels & 7) != 0 || inputChannels <= 0 || taps <= 0 || strideH <= 0 || strideW <= 0)
             throw new ArgumentException("NHWC dense convolution shape is not supported.");
         long inVolume = (long)batch * height * width * inputChannels, outVolume = (long)batch * outputHeight * outputWidth * outputChannels;
         if (input.Length < inVolume || output.Length < outVolume ||
@@ -404,25 +487,15 @@ internal static unsafe partial class Nhwc
                                 {
                                     int kEnd = Math.Min(kTotal, k0 + kc);
                                     float* wk = w + (long)k0 * OcBlock;
-                                    for (int xTile = insideBegin; xTile < insideEnd; xTile++)
-                                    {
-                                        int x0 = xTile * TileRows;
-                                        int rows = Math.Min(TileRows, outputWidth - x0);
-                                        int ix0 = x0 * strideW - padLeft;
-                                        float* outTile = outBase + (outRow + x0) * outputChannels + oc;
-                                        float* resTile = resBase == null ? null : resBase + (outRow + x0) * outputChannels + oc;
-                                        float* p0 = inBatch + (long)iy0 * rowStride + (long)ix0 * inputChannels;
-                                        float* p1 = p0 + (rows > 1 ? pixelStride : 0);
-                                        float* p2 = p1 + (rows > 2 ? pixelStride : 0);
-                                        float* p3 = p2 + (rows > 3 ? pixelStride : 0);
-                                        float* p4 = p3 + (rows > 4 ? pixelStride : 0);
-                                        float* p5 = p4 + (rows > 5 ? pixelStride : 0);
-                                        float* part = partial + xTile * PartialFloats;
-                                        ConvTile16(p0, p1, p2, p3, p4, p5, tapOffsets, taps, wk, k0, kEnd, bb, part);
-                                        if (kEnd == kTotal)
-                                            StoreEpilogue256(part, rows, outTile, outputChannels, resTile, outputChannels,
-                                                activation, alpha, beta);
-                                    }
+                                    // One call covers the row's interior tiles. A
+                                    // per-tile call dominates when K is a single
+                                    // 3×3 (the detector stem is K=27).
+                                    float* outRowPtr = outBase + outRow * outputChannels;
+                                    float* resRowPtr = resBase == null ? null : resBase + outRow * outputChannels;
+                                    ConvInteriorTiles16(inBatch, iy0, rowStride, insideBegin, insideEnd,
+                                        outputWidth, strideW, padLeft, pixelStride, tapOffsets, taps, wk, k0, kEnd, bb,
+                                        partial, outRowPtr, resRowPtr, outputChannels, oc, kEnd == kTotal,
+                                        activation, alpha, beta);
                                 }
                                 // Border tiles: gathered zero-padded patch, full reduction in one pass.
                                 for (int xTile = 0; xTile < xTiles; xTile++)
@@ -455,9 +528,16 @@ internal static unsafe partial class Nhwc
                     ArrayPool<float>.Shared.Return(partialArray);
                 }
             }
-            if (workers > 1) Parallel.For(0, workers, Worker);
-            else Worker(0);
+            if ((outputChannels >> 4) > 0)
+            {
+                if (workers > 1) Parallel.For(0, workers, Worker);
+                else Worker(0);
+            }
         }
+        if ((outputChannels & 8) != 0)
+            DenseTail8Avx(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
+                outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
+                residual, activation, alpha, beta, threads);
     }
 
     // ----------------------------------------------------------- conv transpose
@@ -582,6 +662,288 @@ internal static unsafe partial class Nhwc
                         out1[2 * x] = ActivateScalar(r2 + biasValue, activation);
                         out1[2 * x + 1] = ActivateScalar(r3 + biasValue, activation);
                     }
+                }
+            }
+            if (workers > 1) Parallel.For(0, workers, Worker);
+            else Worker(0);
+        }
+    }
+
+    // --------------------------------------------------------------- oc tail 8
+
+    private const int TailLanes = 8;
+    private const int TailPartial = TileRows * TailLanes;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void StoreEpilogue8(float* partial, int rows, float* output, int outStride,
+        float* residual, int resStride, NhwcActivation activation, float alphaScalar, float betaScalar,
+        float* biasAfter = null)
+    {
+        Vector256<float> alpha = Vector256.Create(alphaScalar), beta = Vector256.Create(betaScalar), one = Vector256.Create(1f);
+        Vector256<float> bias = biasAfter == null ? Vector256<float>.Zero : Avx.LoadVector256(biasAfter);
+        for (int r = 0; r < rows; r++)
+        {
+            Vector256<float> v = Avx.LoadVector256(partial + r * TailLanes);
+            if (biasAfter != null) v = Avx.Add(v, bias);
+            if (residual != null) v = Avx.Add(v, Avx.LoadVector256(residual + r * resStride));
+            if (activation != NhwcActivation.None) v = Activate(v, activation, alpha, beta, one);
+            Avx.Store(output + r * outStride, v);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static void GemmTile8(float* input, int rows, int inStride, float* w, int k0, int kEnd, float* bias, float* partial)
+    {
+        float* p0 = input;
+        float* p1 = p0 + (rows > 1 ? inStride : 0);
+        float* p2 = p1 + (rows > 2 ? inStride : 0);
+        float* p3 = p2 + (rows > 3 ? inStride : 0);
+        float* p4 = p3 + (rows > 4 ? inStride : 0);
+        float* p5 = p4 + (rows > 5 ? inStride : 0);
+        Vector256<float> a0, a1, a2, a3, a4, a5;
+        if (k0 == 0)
+        {
+            Vector256<float> b = bias == null ? Vector256<float>.Zero : Avx.LoadVector256(bias);
+            a0 = a1 = a2 = a3 = a4 = a5 = b;
+        }
+        else
+        {
+            a0 = Avx.LoadVector256(partial);
+            a1 = Avx.LoadVector256(partial + 8);
+            a2 = Avx.LoadVector256(partial + 16);
+            a3 = Avx.LoadVector256(partial + 24);
+            a4 = Avx.LoadVector256(partial + 32);
+            a5 = Avx.LoadVector256(partial + 40);
+        }
+        for (int k = k0; k < kEnd; k++, w += 8)
+        {
+            Vector256<float> wk = Avx.LoadVector256(w);
+            a0 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p0 + k), wk, a0);
+            a1 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p1 + k), wk, a1);
+            a2 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p2 + k), wk, a2);
+            a3 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p3 + k), wk, a3);
+            a4 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p4 + k), wk, a4);
+            a5 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p5 + k), wk, a5);
+        }
+        Avx.Store(partial, a0); Avx.Store(partial + 8, a1);
+        Avx.Store(partial + 16, a2); Avx.Store(partial + 24, a3);
+        Avx.Store(partial + 32, a4); Avx.Store(partial + 40, a5);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static void ConvTile8(float* p0, float* p1, float* p2, float* p3, float* p4, float* p5,
+        int* tapOffsets, int taps, float* w, int k0, int kEnd, float* bias, float* partial)
+    {
+        Vector256<float> a0, a1, a2, a3, a4, a5;
+        if (k0 == 0)
+        {
+            Vector256<float> b = bias == null ? Vector256<float>.Zero : Avx.LoadVector256(bias);
+            a0 = a1 = a2 = a3 = a4 = a5 = b;
+        }
+        else
+        {
+            a0 = Avx.LoadVector256(partial);
+            a1 = Avx.LoadVector256(partial + 8);
+            a2 = Avx.LoadVector256(partial + 16);
+            a3 = Avx.LoadVector256(partial + 24);
+            a4 = Avx.LoadVector256(partial + 32);
+            a5 = Avx.LoadVector256(partial + 40);
+        }
+        int ci = k0 / taps, tap = k0 - ci * taps;
+        for (int k = k0; k < kEnd; k++, w += 8)
+        {
+            int offset = tapOffsets[tap] + ci;
+            Vector256<float> wk = Avx.LoadVector256(w);
+            a0 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p0 + offset), wk, a0);
+            a1 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p1 + offset), wk, a1);
+            a2 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p2 + offset), wk, a2);
+            a3 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p3 + offset), wk, a3);
+            a4 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p4 + offset), wk, a4);
+            a5 = Fma.MultiplyAdd(Avx.BroadcastScalarToVector256(p5 + offset), wk, a5);
+            if (++tap == taps) { tap = 0; ci++; }
+        }
+        Avx.Store(partial, a0); Avx.Store(partial + 8, a1);
+        Avx.Store(partial + 16, a2); Avx.Store(partial + 24, a3);
+        Avx.Store(partial + 32, a4); Avx.Store(partial + 40, a5);
+    }
+
+    private static void PointwiseTail8Avx(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+        Span<float> output, int pixels, int inputChannels, int outputChannels, ReadOnlySpan<float> residual,
+        NhwcActivation activation, float alpha, float beta, int threads)
+    {
+        int oc0 = outputChannels & ~15;
+        int tiles = (pixels + TileRows - 1) / TileRows;
+        int groupTiles = Math.Max(1, PointwiseGroupTiles);
+        long work = (long)pixels * inputChannels * TailLanes;
+        int workers = threads > 1 && work >= 2_000_000 ? Math.Min(threads, tiles) : 1;
+        int kc = PointwiseKc <= 0 ? inputChannels : Math.Min(inputChannels, PointwiseKc);
+        fixed (float* inPtr = input, wPtr = packedWeights, bPtr = bias, outPtr = output, rPtr = residual)
+        {
+            nint inA = (nint)inPtr, wA = (nint)wPtr, bA = (nint)bPtr, outA = (nint)outPtr, rA = (nint)rPtr;
+            bool hasBias = !bias.IsEmpty, hasResidual = !residual.IsEmpty;
+            void Worker(int worker)
+            {
+                int tileBegin = (int)((long)tiles * worker / workers);
+                int tileEnd = (int)((long)tiles * (worker + 1) / workers);
+                if (tileEnd <= tileBegin) return;
+                float[] partialArray = ArrayPool<float>.Shared.Rent(groupTiles * TailPartial);
+                try
+                {
+                    fixed (float* partial = partialArray)
+                    {
+                        float* inBase = (float*)inA, outBase = (float*)outA;
+                        float* wBase = (float*)wA + (long)(outputChannels >> 4) * inputChannels * OcBlock;
+                        float* biasBase = hasBias ? (float*)bA + oc0 : null;
+                        float* resBase = hasResidual ? (float*)rA : null;
+                        int firstGroup = tileBegin / groupTiles, lastGroup = (tileEnd + groupTiles - 1) / groupTiles;
+                        for (int group = firstGroup; group < lastGroup; group++)
+                        {
+                            int tileFrom = Math.Max(tileBegin, group * groupTiles);
+                            int tileTo = Math.Min(tileEnd, (group + 1) * groupTiles);
+                            if (tileTo <= tileFrom) continue;
+                            for (int k0 = 0; k0 < inputChannels; k0 += kc)
+                            {
+                                int kEnd = Math.Min(inputChannels, k0 + kc);
+                                float* wk = wBase + (long)k0 * TailLanes;
+                                for (int tile = tileFrom; tile < tileTo; tile++)
+                                {
+                                    int pixel = tile * TileRows;
+                                    int rows = Math.Min(TileRows, pixels - pixel);
+                                    float* part = partial + (tile - tileFrom) * TailPartial;
+                                    GemmTile8(inBase + (long)pixel * inputChannels, rows, inputChannels, wk, k0, kEnd, biasBase, part);
+                                    if (kEnd == inputChannels)
+                                        StoreEpilogue8(part, rows, outBase + (long)pixel * outputChannels + oc0, outputChannels,
+                                            resBase == null ? null : resBase + (long)pixel * outputChannels + oc0, outputChannels,
+                                            activation, alpha, beta);
+                                }
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    ArrayPool<float>.Shared.Return(partialArray);
+                }
+            }
+            if (workers > 1) Parallel.For(0, workers, Worker);
+            else Worker(0);
+        }
+    }
+
+    private static void DenseTail8Avx(ReadOnlySpan<float> input, ReadOnlySpan<float> packedWeights, ReadOnlySpan<float> bias,
+        Span<float> output, int batch, int inputChannels, int height, int width, int outputChannels,
+        int outputHeight, int outputWidth, int kernelH, int kernelW, int strideH, int strideW, int padTop, int padLeft,
+        ReadOnlySpan<float> residual, NhwcActivation activation, float alpha, float beta, int threads)
+    {
+        int taps = kernelH * kernelW;
+        int oc0 = outputChannels & ~15;
+        int kTotal = inputChannels * taps;
+        int xTiles = (outputWidth + TileRows - 1) / TileRows;
+        int rowsTotal = batch * outputHeight;
+        long outVolume = (long)batch * outputHeight * outputWidth * TailLanes;
+        int workers = threads > 1 && outVolume * kTotal >= 2_000_000 ? Math.Min(threads, rowsTotal) : 1;
+        int patchWidth = (TileRows - 1) * strideW + kernelW;
+        int patchFloats = kernelH * patchWidth * inputChannels;
+        int rowStride = width * inputChannels;
+        fixed (float* inPtr = input, wPtr = packedWeights, bPtr = bias, outPtr = output, rPtr = residual)
+        {
+            nint inA = (nint)inPtr, wA = (nint)wPtr, bA = (nint)bPtr, outA = (nint)outPtr, rA = (nint)rPtr;
+            bool hasBias = !bias.IsEmpty, hasResidual = !residual.IsEmpty;
+            void Worker(int worker)
+            {
+                int rowBegin = (int)((long)rowsTotal * worker / workers);
+                int rowEnd = (int)((long)rowsTotal * (worker + 1) / workers);
+                if (rowEnd <= rowBegin) return;
+                int kc = DenseKc <= 0 ? kTotal : Math.Min(kTotal, DenseKc);
+                int[] tapArray = ArrayPool<int>.Shared.Rent(taps * 2);
+                float[] patchArray = ArrayPool<float>.Shared.Rent(patchFloats);
+                float[] partialArray = ArrayPool<float>.Shared.Rent(xTiles * TailPartial);
+                try
+                {
+                    fixed (int* tapOffsets = tapArray)
+                    fixed (float* patch = patchArray, partial = partialArray)
+                    {
+                        int* patchOffsets = tapOffsets + taps;
+                        for (int ky = 0, tap = 0; ky < kernelH; ky++)
+                            for (int kx = 0; kx < kernelW; kx++, tap++)
+                            {
+                                tapOffsets[tap] = (ky * width + kx) * inputChannels;
+                                patchOffsets[tap] = (ky * patchWidth + kx) * inputChannels;
+                            }
+                        float* inBase = (float*)inA, outBase = (float*)outA;
+                        float* wBase = (float*)wA + (long)(outputChannels >> 4) * kTotal * OcBlock;
+                        float* biasBase = hasBias ? (float*)bA + oc0 : null;
+                        float* resBase = hasResidual ? (float*)rA : null;
+                        int pixelStride = strideW * inputChannels;
+                        for (int row = rowBegin; row < rowEnd; row++)
+                        {
+                            int b = row / outputHeight, y = row - b * outputHeight;
+                            float* inBatch = inBase + (long)b * height * rowStride;
+                            int iy0 = y * strideH - padTop;
+                            bool rowInside = iy0 >= 0 && iy0 + kernelH <= height;
+                            long outRow = ((long)b * outputHeight + y) * outputWidth;
+                            int insideBegin = xTiles, insideEnd = xTiles;
+                            if (rowInside)
+                            {
+                                insideBegin = 0;
+                                while (insideBegin < xTiles && insideBegin * TileRows * strideW - padLeft < 0) insideBegin++;
+                                insideEnd = insideBegin;
+                                while (insideEnd < xTiles)
+                                {
+                                    int x0 = insideEnd * TileRows, rows = Math.Min(TileRows, outputWidth - x0);
+                                    if (x0 * strideW - padLeft + (rows - 1) * strideW + kernelW > width) break;
+                                    insideEnd++;
+                                }
+                            }
+                            for (int k0 = 0; k0 < kTotal; k0 += kc)
+                            {
+                                int kEnd = Math.Min(kTotal, k0 + kc);
+                                float* wk = wBase + (long)k0 * TailLanes;
+                                for (int xTile = insideBegin; xTile < insideEnd; xTile++)
+                                {
+                                    int x0 = xTile * TileRows;
+                                    int rows = Math.Min(TileRows, outputWidth - x0);
+                                    int ix0 = x0 * strideW - padLeft;
+                                    float* p0 = inBatch + (long)iy0 * rowStride + (long)ix0 * inputChannels;
+                                    float* p1 = p0 + (rows > 1 ? pixelStride : 0);
+                                    float* p2 = p1 + (rows > 2 ? pixelStride : 0);
+                                    float* p3 = p2 + (rows > 3 ? pixelStride : 0);
+                                    float* p4 = p3 + (rows > 4 ? pixelStride : 0);
+                                    float* p5 = p4 + (rows > 5 ? pixelStride : 0);
+                                    float* part = partial + (long)xTile * TailPartial;
+                                    ConvTile8(p0, p1, p2, p3, p4, p5, tapOffsets, taps, wk, k0, kEnd, biasBase, part);
+                                    if (kEnd == kTotal)
+                                        StoreEpilogue8(part, rows, outBase + (outRow + x0) * outputChannels + oc0, outputChannels,
+                                            resBase == null ? null : resBase + (outRow + x0) * outputChannels + oc0, outputChannels,
+                                            activation, alpha, beta);
+                                }
+                            }
+                            for (int xTile = 0; xTile < xTiles; xTile++)
+                            {
+                                if (xTile >= insideBegin && xTile < insideEnd) continue;
+                                int x0 = xTile * TileRows;
+                                int rows = Math.Min(TileRows, outputWidth - x0);
+                                int ix0 = x0 * strideW - padLeft;
+                                GatherPatch(inBatch, patch, height, width, inputChannels, iy0, ix0, kernelH, patchWidth);
+                                float* p0 = patch;
+                                float* p1 = p0 + (rows > 1 ? pixelStride : 0);
+                                float* p2 = p1 + (rows > 2 ? pixelStride : 0);
+                                float* p3 = p2 + (rows > 3 ? pixelStride : 0);
+                                float* p4 = p3 + (rows > 4 ? pixelStride : 0);
+                                float* p5 = p4 + (rows > 5 ? pixelStride : 0);
+                                ConvTile8(p0, p1, p2, p3, p4, p5, patchOffsets, taps, wBase, 0, kTotal, biasBase, partial);
+                                StoreEpilogue8(partial, rows, outBase + (outRow + x0) * outputChannels + oc0, outputChannels,
+                                    resBase == null ? null : resBase + (outRow + x0) * outputChannels + oc0, outputChannels,
+                                    activation, alpha, beta);
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    ArrayPool<int>.Shared.Return(tapArray);
+                    ArrayPool<float>.Shared.Return(patchArray);
+                    ArrayPool<float>.Shared.Return(partialArray);
                 }
             }
             if (workers > 1) Parallel.For(0, workers, Worker);

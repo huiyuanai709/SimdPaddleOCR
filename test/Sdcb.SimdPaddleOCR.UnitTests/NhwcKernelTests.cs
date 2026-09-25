@@ -100,6 +100,8 @@ public class NhwcKernelTests
 
     [Theory]
     [InlineData(1, 40, 7, 32, false, 0, 0)]
+    [InlineData(1, 16, 6, 8, false, 1, 0)]       // 8-channel tail, no 16-wide panel
+    [InlineData(1, 24, 5, 24, true, 2, 7)]       // 16-wide panel plus 8-channel tail, K blocked
     [InlineData(2, 300, 13, 48, true, 1, 0)]
     [InlineData(1, 520, 6, 16, true, 2, 0)]
     [InlineData(1, 64, 100, 64, false, 0, 64)]
@@ -136,6 +138,8 @@ public class NhwcKernelTests
     [Theory]
     [InlineData(1, 3, 11, 13, 16, 3, 3, 2, 2, 1, 1)]     // stem 3x3 s2
     [InlineData(1, 20, 9, 14, 32, 3, 3, 1, 1, 1, 1)]     // 3x3 s1
+    [InlineData(1, 16, 9, 11, 8, 2, 2, 1, 1, 0, 0)]      // 16→8 2x2, the det layout-convert case
+    [InlineData(1, 16, 8, 10, 24, 3, 3, 1, 1, 1, 1)]     // 16-wide panel plus 8-channel tail
     [InlineData(2, 8, 7, 9, 16, 2, 2, 1, 1, 0, 0)]       // 2x2 pad end
     [InlineData(1, 12, 10, 12, 32, 7, 7, 1, 1, 3, 3)]    // 7x7
     [InlineData(1, 12, 8, 13, 16, 1, 7, 1, 1, 0, 3)]     // 1x7

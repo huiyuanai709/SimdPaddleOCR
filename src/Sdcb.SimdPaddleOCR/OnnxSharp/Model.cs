@@ -198,7 +198,7 @@ public sealed class Model : IDisposable
 
         if (packKind == PackNhwcDense)
         {
-            if (U32(p, 4) != 1 || dims.Length != 4 || dims[0] < 16 || (dims[0] & 15) != 0) return null;
+            if (U32(p, 4) != 1 || dims.Length != 4 || dims[0] < 8 || (dims[0] & 7) != 0) return null;
             return Nhwc.PackDense(w, dims[0], dims[1], dims[2] * dims[3]);
         }
         if (packKind == PackNhwcDepthwise)
