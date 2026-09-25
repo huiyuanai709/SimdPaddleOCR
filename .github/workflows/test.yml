@@ -21,7 +21,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Unit tests (net10 library)
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
+      - name: Build library (net11, net10, netstandard2.0)
+        run: dotnet build src/Sdcb.SimdPaddleOCR/Sdcb.SimdPaddleOCR.csproj -c Release --nologo
+      - name: Unit tests (net11 library)
         run: dotnet test test/Sdcb.SimdPaddleOCR.UnitTests -c Release --nologo
       - name: Unit tests (ns2.0 library)
         run: dotnet test test/Sdcb.SimdPaddleOCR.UnitTests -c Release --nologo -p:UseNs20Library=true
@@ -31,6 +38,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/cache@v6
         id: dataset
         with:
@@ -62,6 +74,18 @@ jobs:
           - { name: osx-arm64,   os: macos-26,         rid: osx-arm64 }
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
+      - uses: actions/setup-dotnet@v6
+        if: matrix.rid == 'win-x86'
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
+          architecture: x86
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run platform smoke
@@ -94,6 +118,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run tiny/small/medium smoke
@@ -125,6 +154,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run Windows x64 ISA smoke
@@ -178,6 +212,11 @@ jobs:
       matrix: { replica: [1, 2, 3, 4, 5, 6] }
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run Windows x64 benchmark suite
@@ -262,6 +301,11 @@ jobs:
       matrix: { replica: [1, 2, 3, 4, 5, 6] }
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run Windows x64 engine comparison
@@ -318,6 +362,11 @@ jobs:
       matrix: { replica: [1, 2, 3, 4, 5, 6] }
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run ARM64 benchmark suite
@@ -406,6 +455,11 @@ jobs:
       matrix: { replica: [1, 2, 3] }
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/download-artifact@v8
         with: { name: ocr-dataset, path: dataset }
       - name: Run macOS ARM64 worker benchmark
@@ -490,6 +544,11 @@ jobs:
     permissions: { actions: write, contents: read }
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            11.0.100-rc.1.26425.128
+            10.0.x
       - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
