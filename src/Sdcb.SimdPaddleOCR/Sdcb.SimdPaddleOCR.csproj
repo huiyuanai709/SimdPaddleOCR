@@ -13,6 +13,16 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <IsAotCompatible Condition="'$(TargetFramework)' != 'netstandard2.0'">true</IsAotCompatible>
   </PropertyGroup>
+  <!--
+    .NET 11 can compile async methods against the runtime's async machinery
+    ("runtime async" / "async2") instead of Roslyn-generated state machines.
+    Only net11.0 supports it; net10.0 and netstandard2.0 keep the classic
+    state-machine implementation. Opt out with -p:UseRuntimeAsync=false.
+  -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net11.0' and '$(UseRuntimeAsync)' != 'false'">
+    <Features Condition="'$(Features)' == ''">runtime-async=on</Features>
+    <Features Condition="'$(Features)' != ''">$(Features);runtime-async=on</Features>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Sdcb.SimdPaddleOCR.ModelProvider\Sdcb.SimdPaddleOCR.ModelProvider.csproj" />
     <None Include="..\..\README.md" Pack="true" PackagePath="README.md" />

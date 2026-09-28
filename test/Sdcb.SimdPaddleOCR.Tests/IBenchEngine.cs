@@ -42,9 +42,9 @@ static class BenchBoxes
 
 static class BenchEngines
 {
-    public static IBenchEngine Create(string engine, string modelType, int workers, string cAssetsDir) => engine switch
+    public static IBenchEngine Create(string engine, string modelType, int workers, string cAssetsDir, bool useCls = true, int detSide = 0) => engine switch
     {
-        "sharp" => new SharpEngine(modelType, workers),
+        "sharp" => new SharpEngine(modelType, workers, useCls, detSide),
         "c" => new CEngine(cAssetsDir, workers, modelType),
         _ => throw new ArgumentException("--engine must be sharp or c"),
     };

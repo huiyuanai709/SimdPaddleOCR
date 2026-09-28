@@ -16,7 +16,7 @@ using ImageSharpImage = SixLabors.ImageSharp.Image;
 
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
-    Console.WriteLine("usage: --workers 1..16 --model tiny|small|medium --input <dataset> --out <json> [--engine sharp|c] [--smoke|--benchmark] [--benchmark-kind simd|engine] [--count N] [--warmup N] [--case-id ID] [--replica N] [--c-assets <dir>]");
+    Console.WriteLine("usage: --workers 1..16 --model tiny|small|medium --input <dataset> --out <json> [--engine sharp|c] [--smoke|--benchmark] [--benchmark-kind simd|engine] [--count N] [--warmup N] [--case-id ID] [--replica N] [--no-cls] [--det-side N] [--c-assets <dir>]");
     Console.WriteLine("       --summarize <file...> [--input <dataset>] [--out-md <path>]");
     return args.Length == 0 ? 2 : 0;
 }
@@ -32,6 +32,8 @@ int workers = 4;
 string modelType = "tiny";
 string engineName = "sharp";
 bool benchmark = true;
+bool useCls = true;
+int detSide = 0;
 string benchmarkKind = "simd";
 int? count = null;
 int warmupImages = 1;
@@ -50,6 +52,8 @@ for (int i = 0; i < args.Length; i++)
         case "--engine": engineName = Next().ToLowerInvariant(); break;
         case "--smoke": benchmark = false; break;
         case "--benchmark": benchmark = true; break;
+        case "--no-cls": useCls = false; break;
+        case "--det-side": detSide = int.Parse(Next()); break;
         case "--benchmark-kind": benchmarkKind = Next().ToLowerInvariant(); break;
         case "--count": count = int.Parse(Next()); break;
         case "--warmup": warmupImages = int.Parse(Next()); break;
@@ -113,7 +117,7 @@ for (int i = 0; i < files.Length; i++)
     decoded[i] = (Path.GetFileName(files[i]), pixels, image.Width, image.Height);
 }
 
-using IBenchEngine engine = BenchEngines.Create(engineName, modelType, workers, cAssetsDir);
+using IBenchEngine engine = BenchEngines.Create(engineName, modelType, workers, cAssetsDir, useCls, detSide);
 double wsLoaded = WorkingSetMb();
 GCMemoryInfo gcLoaded = GC.GetGCMemoryInfo();
 double gcHeapLoadedMb = gcLoaded.HeapSizeBytes / (1024d * 1024d);
@@ -192,6 +196,8 @@ var meta = new JsonObject
     ["replica"] = replica,
     ["model"] = modelType,
     ["workers"] = workers,
+    ["useCls"] = useCls,
+    ["detSide"] = detSide > 0 ? detSide : 960,
     ["rid"] = RuntimeInformation.RuntimeIdentifier,
     ["os"] = RuntimeInformation.OSDescription,
     ["arch"] = RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(),

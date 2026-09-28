@@ -10,23 +10,40 @@ sealed class SharpEngine : IBenchEngine
     private const int CacheEntries = 32;
     private readonly PaddleOcrAll _ocr;
     private readonly int _workers;
+    private readonly bool _useCls;
     private (double Milliseconds, long Calls)[] _prevStages;
     private (long Ticks, long Calls)[] _prevOp;
     private (long Ticks, long Calls)[] _prevConv;
 
-    public SharpEngine(string modelType, int workers)
+    public SharpEngine(string modelType, int workers, bool useCls = true, int detSide = 0)
     {
-        _ocr = PaddleOcrAll.Load(BenchEngines.Bundle(modelType), new PaddleOcrOptions
+        var bundle = BenchEngines.Bundle(modelType);
+        PaddleOcrOptions options = new()
         {
+            UseDirectionClassification = useCls,
             LineWorkerCount = workers,
-            Detector = new PaddleOcrDetectorOptions { MaxSessionCacheEntries = CacheEntries },
+            Detector = new PaddleOcrDetectorOptions
+            {
+                MaxSessionCacheEntries = CacheEntries,
+                LimitSideLength = detSide > 0 ? detSide : 960,
+            },
             Recognizer = new PaddleOcrRecognizerOptions { AdaptiveWidth = true, TargetWidth = 320 },
-        });
+        };
+        // Passing useCls:false skips loading the CLS graph entirely (rather than
+        // loading it and then dropping it), so load time and working set reflect
+        // a true DET+REC-only pipeline.
+        _ocr = useCls
+            ? PaddleOcrAll.Load(bundle, options)
+            : new PaddleOcrAll(PaddleOcrModelSet.Load(bundle.Detection.OpenRead(), null,
+                bundle.Recognition.OpenRead(), bundle.Dictionary.OpenRead()), options);
         PipelineProfiler.Enable(true);
         InferenceSession.EnableProfiling(true);
         Extra["cacheEntries"] = CacheEntries;
         Extra["effectiveWorkers"] = _ocr.EffectiveLineWorkerCount;
+        Extra["cls"] = useCls;
+        Extra["detSide"] = detSide > 0 ? detSide : 960;
         _workers = workers;
+        _useCls = useCls;
         _prevStages = PipelineProfiler.Snapshot();
         _prevOp = InferenceSession.ProfileSnapshot();
         _prevConv = InferenceSession.ConvClassProfileSnapshot();
@@ -35,7 +52,7 @@ sealed class SharpEngine : IBenchEngine
     public string Name => "sharp";
     public JsonObject Extra { get; } = [];
     public string LoadedMessage(double workingSetMb) =>
-        $"loaded working_set={workingSetMb:F1} MB engine=sharp workers={_ocr.EffectiveLineWorkerCount}/{_workers} cpu={Environment.ProcessorCount}";
+        $"loaded working_set={workingSetMb:F1} MB engine=sharp workers={_ocr.EffectiveLineWorkerCount}/{_workers} cls={_useCls} cpu={Environment.ProcessorCount}";
 
     public BenchEngineOutput Run(byte[] bgr, int width, int height, int stride)
     {
