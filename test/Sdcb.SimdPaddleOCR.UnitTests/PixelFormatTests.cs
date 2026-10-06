@@ -168,12 +168,27 @@ public class PixelFormatTests
     }
 
     [Fact]
+    public void Gray8_MatchesReplicatedBgr()
+    {
+        (int width, int height, byte[] bgr) = MakeGrayBgr(41, 27);
+        byte[] gray = ToGray(bgr);
+        CompareDet(bgr, width, height, gray, ImagePixelFormat.Gray8, width);
+        CompareCls(bgr, width, height, gray, ImagePixelFormat.Gray8, width);
+        CompareRec(bgr, width, height, gray, ImagePixelFormat.Gray8, width);
+        PaddleOcrDetectionBox box = new(3, 4, 36, 5, 35, 22, 4, 21, 1);
+        byte[] expected = PPOCRCrop.Extract(bgr, width, height, width * 3, box, out int ow, out int oh);
+        AssertCropsEqual(expected, PPOCRCrop.Extract(gray, width, height, width, box,
+            out int w, out int h, ImagePixelFormat.Gray8), ow, oh, w, h);
+    }
+
+    [Fact]
     public void ResolveStride_ZeroUsesBytesPerPixel()
     {
         Assert.Equal(30, ImagePixels.ResolveStride(10, 0, ImagePixelFormat.Bgr24));
         Assert.Equal(30, ImagePixels.ResolveStride(10, 0, ImagePixelFormat.Rgb24));
         Assert.Equal(40, ImagePixels.ResolveStride(10, 0, ImagePixelFormat.Bgra32));
         Assert.Equal(40, ImagePixels.ResolveStride(10, 0, ImagePixelFormat.Rgba32));
+        Assert.Equal(10, ImagePixels.ResolveStride(10, 0, ImagePixelFormat.Gray8));
         Assert.Equal(48, ImagePixels.ResolveStride(10, 48, ImagePixelFormat.Bgra32));
         Assert.Throws<ArgumentException>(() => ImagePixels.ResolveStride(10, 20, ImagePixelFormat.Rgba32));
     }
@@ -224,6 +239,28 @@ public class PixelFormatTests
         var rng = new Random(11);
         rng.NextBytes(bgr);
         return (width, height, bgr);
+    }
+
+    private static (int Width, int Height, byte[] Bgr) MakeGrayBgr(int width, int height)
+    {
+        byte[] bgr = new byte[width * height * 3];
+        var rng = new Random(13);
+        for (int i = 0; i < bgr.Length; i += 3)
+        {
+            byte v = (byte)rng.Next(256);
+            bgr[i] = v;
+            bgr[i + 1] = v;
+            bgr[i + 2] = v;
+        }
+        return (width, height, bgr);
+    }
+
+    private static byte[] ToGray(byte[] bgr)
+    {
+        byte[] gray = new byte[bgr.Length / 3];
+        for (int i = 0, o = 0; i < bgr.Length; i += 3, o++)
+            gray[o] = bgr[i];
+        return gray;
     }
 
     private static byte[] ToRgb24(byte[] bgr)

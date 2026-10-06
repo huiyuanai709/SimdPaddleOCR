@@ -86,17 +86,22 @@ internal static partial class Warp
         Vector<double> wx0, Vector<double> wx1, Vector<double> wx2, Vector<double> wx3,
         Vector<double> wy, Vector<double> acc)
     {
-        acc += LoadPixelVector(row) * wx0 * wy;
-        acc += LoadPixelVector(row + bpp) * wx1 * wy;
-        acc += LoadPixelVector(row + 2 * bpp) * wx2 * wy;
-        acc += LoadPixelVector(row + 3 * bpp) * wx3 * wy;
+        acc += LoadPixelVector(row, bpp) * wx0 * wy;
+        acc += LoadPixelVector(row + bpp, bpp) * wx1 * wy;
+        acc += LoadPixelVector(row + 2 * bpp, bpp) * wx2 * wy;
+        acc += LoadPixelVector(row + 3 * bpp, bpp) * wx3 * wy;
         return acc;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe Vector<double> LoadPixelVector(byte* pixel)
+    private static unsafe Vector<double> LoadPixelVector(byte* pixel, int bpp)
     {
         Vector<double> value = Vector<double>.Zero;
+        if (bpp == 1)
+        {
+            double g = pixel[0];
+            return value.WithElement(0, g).WithElement(1, g).WithElement(2, g);
+        }
         return value.WithElement(0, pixel[0]).WithElement(1, pixel[1]).WithElement(2, pixel[2]);
     }
 

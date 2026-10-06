@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Sdcb.SimdPaddleOCR.Kernels;
@@ -198,7 +199,7 @@ public sealed partial class InferenceSession : IOcrSession
     private const int PlanCacheCapacity = 8;
     private readonly List<ShapePlan> _planCache = [];
 
-    private bool TryGetPlan(ReadOnlySpan<int> inputShape, bool forCtc, out ShapePlan? plan)
+    private bool TryGetPlan(ReadOnlySpan<int> inputShape, bool forCtc, [NotNullWhen(true)] out ShapePlan? plan)
     {
         for (int i = 0; i < _planCache.Count; i++)
         {
