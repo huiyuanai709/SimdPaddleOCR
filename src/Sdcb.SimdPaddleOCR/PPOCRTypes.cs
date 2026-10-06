@@ -90,25 +90,38 @@ public sealed class PaddleOcrOptions
     /// A positive value is a maximum, clamped to
     /// <see cref="Environment.ProcessorCount"/> (2-core machine requesting 4
     /// → 2). <c>0</c> (default) is <c>min(ProcessorCount, 4)</c>. Does not
-    /// change <see cref="DetIntraOpThreads"/>. Leftover cores go to hidden
-    /// REC intra-op (cap 4).
+    /// change <see cref="DetIntraOpThreads"/>. Leftover cores go to REC
+    /// intra-op unless <see cref="RecIntraOpThreads"/> is set.
     /// </summary>
     public int LineWorkerCount { get; init; }
     /// <summary>
     /// Intra-op threads inside the detector's convolutions. DET runs in an
     /// exclusive window before line workers start, so this does not multiply
     /// with <see cref="LineWorkerCount"/>. <c>0</c> (default) uses up to 8.
-    /// CLS and REC share <see cref="LineWorkerCount"/>; they are not given
-    /// separate intra-op knobs.
+    /// CLS and REC share <see cref="LineWorkerCount"/>. REC intra-op is
+    /// <see cref="RecIntraOpThreads"/> (auto when that is 0).
     /// </summary>
     public int DetIntraOpThreads { get; init; }
+    /// <summary>
+    /// Intra-op threads inside each recognizer session. <c>0</c> (default)
+    /// keeps the historical budget: leftover cores after
+    /// <see cref="LineWorkerCount"/>, capped at 8, and a short page may
+    /// raise it up to <see cref="Environment.ProcessorCount"/>. That budget
+    /// is per engine. A pool of engines on one machine should set this to 1
+    /// (or another explicit cap) so <c>engines × line workers × intra-op</c>
+    /// does not exceed the cores; leaving it at 0 makes every engine claim
+    /// the whole CPU.
+    /// </summary>
+    public int RecIntraOpThreads { get; init; }
     /// <summary>
     /// Maximum lines per batched recognizer graph call (same-target-width
     /// lines only, so results stay bit-identical to per-line execution).
     /// The default of 1 keeps per-line execution: on the interpreter each
     /// operator processes the whole batch before the next one runs, which
-    /// inflates the activation working set and measured ~20% slower than
-    /// per-line REC on an 8-core Zen 3. Raise only after profiling.
+    /// inflates the activation working set and measured slower than
+    /// per-line REC. A same-width group is also split across
+    /// <see cref="LineWorkerCount"/> so one wide batch does not occupy a
+    /// single worker. Raise only after profiling.
     /// </summary>
     public int RecBatchLines { get; init; } = 1;
     public long MaxCropPixels { get; init; } = 16_000_000;

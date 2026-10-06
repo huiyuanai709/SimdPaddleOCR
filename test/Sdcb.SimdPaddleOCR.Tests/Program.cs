@@ -27,6 +27,8 @@ if (args[0] == "--kernel-bench")
     return KernelBench.Run(args);
 if (args[0] == "--concurrent-bench")
     return ConcurrentBench.Run(args);
+if (args[0] == "--page-profile")
+    return PageProfile.Run(args);
 
 int workers = 4;
 string modelType = "tiny";

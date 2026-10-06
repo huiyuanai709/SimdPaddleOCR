@@ -37,6 +37,55 @@ internal static unsafe partial class PixelRow
         }
     }
 
+    [MethodImpl(MethodImplCompat.AggressiveOptimization)]
+    private static void GatherGrayAvx(byte* row, int sourceWidth, int destinationWidth,
+        int[] offsets, short[] coefficients, int[] destination)
+    {
+        int last = sourceWidth - 1;
+        // A dword gather at a byte index reads three bytes past the pixel.
+        // Stay scalar once a tap can see the end of the row.
+        int safeLast = sourceWidth - 4;
+        fixed (int* off = offsets)
+        fixed (short* coeff = coefficients)
+        {
+            int x = 0;
+            if (safeLast >= 0)
+            {
+                Vector256<int> one = Vector256.Create(1);
+                Vector256<int> ff = Vector256.Create(255);
+                Vector256<int> limit = Vector256.Create(last);
+                for (; x <= destinationWidth - 8; x += 8)
+                {
+                    Vector256<int> sx = Avx.LoadDquVector256(off + x);
+                    if (sx.GetElement(7) > safeLast) break;
+                    Vector256<int> sx1 = Avx2.Min(Avx2.Add(sx, one), limit);
+                    Vector256<int> p0 = Avx2.GatherVector256((int*)row, sx, 1);
+                    Vector256<int> p1 = Avx2.GatherVector256((int*)row, sx1, 1);
+                    Vector256<int> g0 = Avx2.And(p0, ff);
+                    Vector256<int> g1 = Avx2.And(p1, ff);
+                    SplitCoeffAvx(coeff + x * 2, out Vector256<int> c0, out Vector256<int> c1);
+                    Vector256<int> value = Avx2.Add(Avx2.MultiplyLow(g0, c0), Avx2.MultiplyLow(g1, c1));
+                    StoreBgrAvx(destination, x, value, value, value);
+                }
+            }
+            GatherGrayScalarRange(row, last, x, destinationWidth, offsets, coefficients, destination);
+        }
+    }
+
+    private static void GatherGrayScalarRange(byte* row, int last, int begin, int end,
+        int[] offsets, short[] coefficients, int[] destination)
+    {
+        for (int x = begin; x < end; x++)
+        {
+            int sx = offsets[x], sx1 = Math.Min(sx + 1, last);
+            int value = row[sx] * coefficients[x * 2] + row[sx1] * coefficients[x * 2 + 1];
+            int d = x * 3;
+            destination[d] = value;
+            destination[d + 1] = value;
+            destination[d + 2] = value;
+        }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void SplitCoeffAvx(short* coeff, out Vector256<int> c0, out Vector256<int> c1)
     {

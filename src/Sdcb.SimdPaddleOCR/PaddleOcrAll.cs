@@ -109,6 +109,8 @@ public sealed class PaddleOcrAll : IDisposable
         if (_options.LineWorkerCount is < 0 or > Parallelism.MaxLineWorkers)
             throw new ArgumentOutOfRangeException(nameof(options));
         if (_options.RecBatchLines < 1) throw new ArgumentOutOfRangeException(nameof(options));
+        if (_options.RecIntraOpThreads is < 0 or > 16)
+            throw new ArgumentOutOfRangeException(nameof(options));
         if (_options.ClassifierThreshold is < 0 or > 1 || !MathCompat.IsFinite(_options.ClassifierThreshold))
             throw new ArgumentOutOfRangeException(nameof(options));
         if (!_options.UseDirectionClassification) classifierModel = null;
@@ -119,12 +121,23 @@ public sealed class PaddleOcrAll : IDisposable
         _detector = new PaddleOcrDetector(detectorModel ?? throw new ArgumentNullException(nameof(detectorModel)), _options.Detector,
             ResolveDetectorIntraThreads(_options));
         _classifier = classifierModel is null ? null : new PaddleOcrClassifier(classifierModel, _options.Classifier);
-        _recIntraOpBase = Parallelism.ResolveRecognizerIntraOp(_lineWorkers);
-        // Tail boost ceiling: CompiledModel clamps to 16 anyway. The NHWC
-        // kernels are FMA-bound and the detector measured faster at 16 than
-        // at 8 on Zen 3, so idle line-worker cores are worth feeding even
-        // past the physical-core count.
-        _recIntraOpMax = Math.Min(Environment.ProcessorCount, 16);
+        if (_options.RecIntraOpThreads > 0)
+        {
+            // Explicit cap: do not let the short-page boost climb back to
+            // ProcessorCount. A pool of engines sets this so each engine
+            // stays inside its share of the machine.
+            _recIntraOpBase = _options.RecIntraOpThreads;
+            _recIntraOpMax = _options.RecIntraOpThreads;
+        }
+        else
+        {
+            _recIntraOpBase = Parallelism.ResolveRecognizerIntraOp(_lineWorkers);
+            // Tail boost ceiling: CompiledModel clamps to 16 anyway. The NHWC
+            // kernels are FMA-bound and the detector measured faster at 16 than
+            // at 8 on Zen 3, so idle line-worker cores are worth feeding even
+            // past the physical-core count.
+            _recIntraOpMax = Math.Min(Environment.ProcessorCount, 16);
+        }
         _recognizer = new PaddleOcrRecognizer(recognizerModel ?? throw new ArgumentNullException(nameof(recognizerModel)),
             dictionaryUtf8, _options.Recognizer, ownsModel: false,
             _recIntraOpBase);
@@ -387,21 +400,24 @@ public sealed class PaddleOcrAll : IDisposable
             }
 
             Dictionary<int, List<int>> groups = [];
-            List<int[]> units = [];
             for (int i = 0; i < count; i++)
             {
                 if (!groups.TryGetValue(recWidths[i], out List<int>? members))
                     groups[recWidths[i]] = members = [];
                 members.Add(i);
-                if (members.Count == maxBatch)
+            }
+            List<int[]> units = [];
+            foreach (List<int> members in groups.Values)
+            {
+                int batch = Parallelism.RecognizeBatchSize(members.Count, maxBatch, workerCount);
+                for (int offset = 0; offset < members.Count; offset += batch)
                 {
-                    units.Add([.. members]);
-                    members.Clear();
+                    int n = Math.Min(batch, members.Count - offset);
+                    int[] unit = new int[n];
+                    for (int k = 0; k < n; k++) unit[k] = members[offset + k];
+                    units.Add(unit);
                 }
             }
-            foreach (List<int> members in groups.Values)
-                if (members.Count > 0)
-                    units.Add([.. members]);
 
             int unitWorkers = Math.Max(1, Math.Min(workerCount, units.Count));
             // Idle workers' cores go to the units actually running: a single
@@ -416,10 +432,22 @@ public sealed class PaddleOcrAll : IDisposable
             }
             else
             {
-                Parallel.For(0, unitWorkers, worker =>
+                // Longest batch first, then a shared cursor. Static stride
+                // over first-seen width order left one worker with the wide
+                // lines and the other with the short tail.
+                units.Sort((a, b) =>
                 {
-                    for (int u = worker; u < units.Count; u += workerCount)
-                        RecognizeUnit(units[u], unitIntraOp, cropBuffer, offsets, bytes, widths, heights,
+                    int widthA = recWidths[a[0]], widthB = recWidths[b[0]];
+                    long costA = (long)a.Length * widthA, costB = (long)b.Length * widthB;
+                    int byCost = costB.CompareTo(costA);
+                    return byCost != 0 ? byCost : widthB.CompareTo(widthA);
+                });
+                int cursor = -1;
+                Parallel.For(0, unitWorkers, _ =>
+                {
+                    int next;
+                    while ((next = Interlocked.Increment(ref cursor)) < units.Count)
+                        RecognizeUnit(units[next], unitIntraOp, cropBuffer, offsets, bytes, widths, heights,
                             recWidths, recResults, returnCtcAlignment);
                 });
             }

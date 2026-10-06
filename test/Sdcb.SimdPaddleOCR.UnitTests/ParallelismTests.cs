@@ -15,6 +15,17 @@ public class ParallelismTests
         Assert.Equal(expected, Parallelism.ResolveLineWorkers(requested, processorCount));
 
     [Theory]
+    [InlineData(8, 8, 2, 4)]
+    [InlineData(8, 8, 1, 8)]
+    [InlineData(8, 8, 4, 2)]
+    [InlineData(20, 8, 2, 8)]
+    [InlineData(5, 8, 2, 3)]
+    [InlineData(1, 8, 4, 1)]
+    [InlineData(3, 8, 2, 2)]
+    public void RecognizeBatchSize_SpreadsAcrossWorkers(int group, int maxBatch, int workers, int expected) =>
+        Assert.Equal(expected, Parallelism.RecognizeBatchSize(group, maxBatch, workers));
+
+    [Theory]
     [InlineData(2, 2, 1)]
     [InlineData(1, 2, 2)]
     [InlineData(4, 16, 4)]
