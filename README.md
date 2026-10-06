@@ -140,7 +140,7 @@ using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(
     dictionaryPath: "models/ppocr_keys.txt");
 ```
 
-Vulkan 默认选第一块独显（没有独显再选核显，最后才是 lavapipe 这类 CPU 设备）。`OcrVulkan.DeviceSelector` 或环境变量 `SIMD_OCR_VK_DEVICE` 可以填枚举序号，或设备名的一段（例如 `MX450`）。同一份 ONNX 不管建几个引擎，权重只上传一次。单块 buffer 不超过设备显存的 1/4，低于 4 GB 时上限 256 MB，否则 512 MB；放不下的那张图回落到 CPU，不把整个进程的 GPU 路径关掉。`OcrVulkan.RecommendedEngineCount` 在设备显存低于 4 GB 时返回 1。分配和释放记在 `OcrVulkan.LiveDeviceBytes`，`OcrVulkan.OnDebug` 可以接调试日志。
+Vulkan 默认选第一块独显（没有独显再选核显，最后才是 lavapipe 这类 CPU 设备）。`OcrVulkan.DeviceSelector` 或环境变量 `SIMD_OCR_VK_DEVICE` 可以填枚举序号，或设备名的一段（例如 `MX450`）。同一份 ONNX 不管建几个引擎，权重只上传一次。单块 buffer 不超过设备显存的 1/4，低于 4 GB 时上限 256 MB，否则 512 MB；放不下的那张图回落到 CPU，不把整个进程的 GPU 路径关掉。`OcrVulkan.RecommendedEngineCount` 在设备显存低于 4 GB 时返回 1。分配和释放记在 `OcrVulkan.LiveDeviceBytes`，`OcrVulkan.OnDebug` 可以接调试日志。Metal 用同一套上限：预算取 `recommendedMaxWorkingSetSize`，同一份 ONNX 只上传一次权重，单块 buffer 超限或 `newBuffer` 失败时那一张图回落 CPU。着色器以字面资源名嵌进程序集，并由 `ILLink.Descriptors.xml` 标成保留，避免 Native AOT 裁掉 `.metal`。
 
 `PaddleOcrOptions` 里两套并行不要混用：`DetIntraOpThreads` 是检测图内的卷积线程
 （一份 session，默认最多 8）；`LineWorkerCount` 是一行一组的 CLS/REC worker 路数

@@ -88,24 +88,12 @@ internal sealed class MtlDevice : IDisposable
         }
     }
 
+    public ulong BufferCap => OcrVulkan.BufferByteCap(RecommendedMaxWorkingSetSize);
+
     private MtlLibrary OcrLibrary()
     {
         if (_ocrLib is not null) return _ocrLib;
-        var asm = typeof(MtlDevice).Assembly;
-        var names = asm.GetManifestResourceNames()
-            .Where(n => n.StartsWith("Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.")
-                        && n.EndsWith(".metal"))
-            .OrderBy(n => n).ToArray();
-        if (names.Length == 0)
-            throw new FileNotFoundException("Metal: no embedded .metal shaders");
-        var sb = new System.Text.StringBuilder();
-        foreach (var n in names)
-        {
-            using Stream s = asm.GetManifestResourceStream(n)!;
-            using var r = new StreamReader(s);
-            sb.AppendLine(r.ReadToEnd());
-        }
-        return _ocrLib = NewLibrary(sb.ToString());
+        return _ocrLib = NewLibrary(MetalShaders.LoadSource(typeof(MtlDevice).Assembly));
     }
 
     public MtlBuffer NewBuffer(nuint bytes)

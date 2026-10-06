@@ -21,22 +21,52 @@ internal sealed class MetalGraphModel
     internal static readonly MtlBuffer RoleArena = new(0, 0), RoleIn = new(0, 0),
         RoleOut = new(0, 0), RolePart = new(0, 0);
 
-    private static readonly ConditionalWeakTable<CompiledModel, MetalGraphModel> s_models = new();
+    // Keyed by ONNX content, not CompiledModel identity: each engine parses
+    // its own Model, and the weight buffers must be uploaded once.
+    private static readonly Dictionary<(ulong Key, MtlDevice Device), MetalGraphModel> s_models = new();
     private int _refs;
 
-    /// <summary>Ref-counted shared model for (device, compiled); released by
-    /// <see cref="Release"/> when the last session goes away.</summary>
+    /// <summary>Ref-counted shared model for one ONNX graph on one device.
+    /// Released by <see cref="Release"/> when the last session goes away.</summary>
     internal static MetalGraphModel Acquire(MtlDevice dev, CompiledModel compiled)
     {
+        ulong key = compiled.Model.ContentKey;
         lock (s_models)
         {
-            if (!s_models.TryGetValue(compiled, out MetalGraphModel? m) || m._refs == 0 || m._dev != dev)
+            var id = (key, dev);
+            if (!s_models.TryGetValue(id, out MetalGraphModel? m) || m._refs == 0)
             {
                 m = new MetalGraphModel(dev, compiled);
-                s_models.AddOrUpdate(compiled, m);
+                s_models[id] = m;
+                OcrVulkan.Debug($"metal graph new key={key:x16}");
+            }
+            else
+            {
+                if (m._compiled.Disposed)
+                {
+                    lock (m)
+                        m._compiled = compiled;
+                }
+                OcrVulkan.Debug($"metal graph reuse key={key:x16} refs={m._refs}");
             }
             m._refs++;
             return m;
+        }
+    }
+
+    /// <summary>
+    /// A session whose compiled model is still alive replaces a shared graph
+    /// that was built from an engine already disposed.
+    /// </summary>
+    internal void Use(CompiledModel compiled)
+    {
+        if (!compiled.Disposed && _compiled.Disposed)
+        {
+            lock (this)
+            {
+                if (_compiled.Disposed)
+                    _compiled = compiled;
+            }
         }
     }
 
@@ -45,8 +75,7 @@ internal sealed class MetalGraphModel
         lock (s_models)
         {
             if (--_refs > 0) return;
-            if (s_models.TryGetValue(_compiled, out MetalGraphModel? cur) && cur == this)
-                s_models.Remove(_compiled);
+            s_models.Remove((_key, _dev));
             lock (this)
             {
                 foreach (MtlBuffer b in _allBufs) b.Dispose();
@@ -57,8 +86,9 @@ internal sealed class MetalGraphModel
     }
 
     private readonly MtlDevice _dev;
+    private readonly ulong _key;
     private readonly Model _model;
-    private readonly CompiledModel _compiled;
+    private CompiledModel _compiled;
     internal MtlDevice Device => _dev;
     internal MtlPipeline OutPipe => _pOut;
 
@@ -180,6 +210,7 @@ internal sealed class MetalGraphModel
         _dev = dev;
         _compiled = compiled;
         _model = compiled.Model;
+        _key = _model.ContentKey;
 
         // one probe per capability tier: the simdgroup-matrix kernels get a
         // PSO + smoke dispatch; failure downgrades the cm paths to the
