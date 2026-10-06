@@ -34,6 +34,8 @@
     <None Remove="Backends\Vulkan\Shaders\*.spv" />
     <EmbeddedResource Include="Backends\Metal\Shaders\*.metal" />
     <None Remove="Backends\Metal\Shaders\*.metal" />
+    <!-- Consumed automatically by the app's ILLink as an embedded descriptor. -->
+    <EmbeddedResource Include="ILLink.Descriptors.xml" LogicalName="ILLink.Descriptors.xml" />
   </ItemGroup>
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <Compile Remove="Backends/**/*.cs" />

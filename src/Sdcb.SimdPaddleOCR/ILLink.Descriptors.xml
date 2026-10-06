@@ -1,0 +1,11 @@
+<linker>
+  <assembly fullname="Sdcb.SimdPaddleOCR">
+    <resource name="Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.a_common.metal" action="preserve" />
+    <resource name="Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.conv.metal" action="preserve" />
+    <resource name="Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.dot.metal" action="preserve" />
+    <resource name="Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.elem.metal" action="preserve" />
+    <resource name="Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.gemm.metal" action="preserve" />
+    <resource name="Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.space.metal" action="preserve" />
+    <resource name="Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.xform.metal" action="preserve" />
+  </assembly>
+</linker>
