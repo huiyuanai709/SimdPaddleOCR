@@ -28,7 +28,15 @@
     <None Include="..\..\README.md" Pack="true" PackagePath="README.md" />
     <None Include="linqpad-samples\*.linq" Pack="true" PackagePath="linqpad-samples" />
   </ItemGroup>
+  <!-- ns2.0 不包含 GPU 后端，不嵌入 SPIR-V / Metal shader。net11 与 net10 都嵌入。 -->
+  <ItemGroup Condition="'$(TargetFramework)' != 'netstandard2.0'">
+    <EmbeddedResource Include="Backends\Vulkan\Shaders\*.spv" />
+    <None Remove="Backends\Vulkan\Shaders\*.spv" />
+    <EmbeddedResource Include="Backends\Metal\Shaders\*.metal" />
+    <None Remove="Backends\Metal\Shaders\*.metal" />
+  </ItemGroup>
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <Compile Remove="Backends/**/*.cs" />
     <PackageReference Include="Microsoft.Bcl.Numerics" Version="10.0.11" />
     <PackageReference Include="System.Memory" Version="4.6.3" />
     <PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />

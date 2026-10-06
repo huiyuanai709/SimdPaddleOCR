@@ -66,7 +66,9 @@ static class PageProfile
             DetIntraOpThreads = detThreads,
             RecBatchLines = recBatch,
             RecIntraOpThreads = recIntra,
-            Detector = new PaddleOcrDetectorOptions { LimitSideLength = 960 },
+            Detector = new PaddleOcrDetectorOptions { LimitSideLength = 960, Backend = OcrBackend.Cpu },
+            Recognizer = new PaddleOcrRecognizerOptions { Backend = OcrBackend.Cpu },
+            Classifier = new PaddleOcrClassifierOptions { Backend = OcrBackend.Cpu },
         };
 
         using var detStream = ChineseV6TinyModel.Detection.OpenRead();
