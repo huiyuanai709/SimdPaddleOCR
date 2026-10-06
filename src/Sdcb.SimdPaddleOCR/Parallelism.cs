@@ -55,4 +55,22 @@ internal static class Parallelism
         int workers = Math.Max(1, lineWorkers);
         return MathCompat.Clamp(cpu / workers, 1, MaxRecognizerIntraOpThreads);
     }
+
+    /// <summary>
+    /// Lines of one target width to pack into a single recognizer graph call.
+    /// <paramref name="maxBatch"/> is the caller's cap. When several line
+    /// workers are running, a same-width group is split so each worker gets a
+    /// piece: one batch of eight wide lines is a single graph call and leaves
+    /// the other workers idle after the short lines finish. Each line still
+    /// uses its own width bucket, so the tensor contents do not change.
+    /// </summary>
+    public static int RecognizeBatchSize(int groupCount, int maxBatch, int lineWorkers)
+    {
+        if (groupCount <= 1) return 1;
+        int cap = Math.Max(1, maxBatch);
+        int workers = Math.Max(1, lineWorkers);
+        if (workers == 1) return Math.Min(cap, groupCount);
+        int spread = (groupCount + workers - 1) / workers;
+        return Math.Min(cap, Math.Max(1, spread));
+    }
 }

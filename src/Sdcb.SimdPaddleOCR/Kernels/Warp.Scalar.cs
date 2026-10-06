@@ -79,9 +79,19 @@ internal static partial class Warp
                 for (int kx = 0; kx < 4; kx++, sourceOffset += bpp)
                 {
                     double wx = xWeights[kx];
-                    value0 += source[sourceOffset] * wx * wy;
-                    value1 += source[sourceOffset + 1] * wx * wy;
-                    value2 += source[sourceOffset + 2] * wx * wy;
+                    if (bpp == 1)
+                    {
+                        double sample = source[sourceOffset] * wx * wy;
+                        value0 += sample;
+                        value1 += sample;
+                        value2 += sample;
+                    }
+                    else
+                    {
+                        value0 += source[sourceOffset] * wx * wy;
+                        value1 += source[sourceOffset + 1] * wx * wy;
+                        value2 += source[sourceOffset + 2] * wx * wy;
+                    }
                 }
             }
         }
@@ -96,9 +106,19 @@ internal static partial class Warp
                     double wx = xWeights[kx];
                     int sx = Clamp(xBase + kx - 1, width);
                     int sourceOffset = sy * stride + sx * bpp;
-                    value0 += source[sourceOffset] * wx * wy;
-                    value1 += source[sourceOffset + 1] * wx * wy;
-                    value2 += source[sourceOffset + 2] * wx * wy;
+                    if (bpp == 1)
+                    {
+                        double sample = source[sourceOffset] * wx * wy;
+                        value0 += sample;
+                        value1 += sample;
+                        value2 += sample;
+                    }
+                    else
+                    {
+                        value0 += source[sourceOffset] * wx * wy;
+                        value1 += source[sourceOffset + 1] * wx * wy;
+                        value2 += source[sourceOffset + 2] * wx * wy;
+                    }
                 }
             }
         }

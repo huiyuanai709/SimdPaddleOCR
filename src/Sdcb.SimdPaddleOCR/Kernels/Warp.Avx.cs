@@ -86,16 +86,23 @@ internal static partial class Warp
         Vector256<double> wx0, Vector256<double> wx1, Vector256<double> wx2, Vector256<double> wx3,
         Vector256<double> wy, Vector256<double> acc)
     {
-        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row), wx0), wy));
-        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + bpp), wx1), wy));
-        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 2 * bpp), wx2), wy));
-        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 3 * bpp), wx3), wy));
+        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row, bpp), wx0), wy));
+        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + bpp, bpp), wx1), wy));
+        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 2 * bpp, bpp), wx2), wy));
+        acc = Avx.Add(acc, Avx.Multiply(Avx.Multiply(LoadPixelAvx(row + 3 * bpp, bpp), wx3), wy));
         return acc;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe Vector256<double> LoadPixelAvx(byte* pixel) =>
-        Avx.ConvertToVector256Double(Sse41.ConvertToVector128Int32(pixel));
+    private static unsafe Vector256<double> LoadPixelAvx(byte* pixel, int bpp)
+    {
+        if (bpp == 1)
+        {
+            double g = pixel[0];
+            return Vector256.Create(g, g, g, 0);
+        }
+        return Avx.ConvertToVector256Double(Sse41.ConvertToVector128Int32(pixel));
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<double> CubicWeightVectorAvx(Vector256<double> value)

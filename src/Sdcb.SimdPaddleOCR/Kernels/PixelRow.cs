@@ -12,6 +12,32 @@ namespace Sdcb.SimdPaddleOCR.Kernels;
 /// </summary>
 internal static unsafe partial class PixelRow
 {
+    internal static void GatherGray(byte* row, int sourceWidth, int destinationWidth,
+        int[] offsets, short[] coefficients, int[] destination)
+    {
+#if !NETSTANDARD2_0
+        if (Avx2.IsSupported)
+            GatherGrayAvx(row, sourceWidth, destinationWidth, offsets, coefficients, destination);
+        else
+#endif
+            GatherGrayScalar(row, sourceWidth, destinationWidth, offsets, coefficients, destination);
+    }
+
+    internal static void GatherGrayScalar(byte* row, int sourceWidth, int destinationWidth,
+        int[] offsets, short[] coefficients, int[] destination)
+    {
+        int last = sourceWidth - 1;
+        for (int x = 0; x < destinationWidth; x++)
+        {
+            int sx = offsets[x], sx1 = Math.Min(sx + 1, last);
+            int value = row[sx] * coefficients[x * 2] + row[sx1] * coefficients[x * 2 + 1];
+            int d = x * 3;
+            destination[d] = value;
+            destination[d + 1] = value;
+            destination[d + 2] = value;
+        }
+    }
+
     internal static void Gather32(ReadOnlySpan<byte> row, int sourceWidth, int destinationWidth,
         int[] offsets, short[] coefficients, int[] destination, bool rgba)
     {

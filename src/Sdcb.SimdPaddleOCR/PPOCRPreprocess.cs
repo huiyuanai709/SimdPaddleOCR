@@ -290,6 +290,11 @@ internal static class PPOCRPreprocess
             PixelRow.GatherRgb24(row, sourceWidth, destinationWidth, offsets, coefficients, destination);
             return;
         }
+        if (format == ImagePixelFormat.Gray8)
+        {
+            PixelRow.GatherGray(row, sourceWidth, destinationWidth, offsets, coefficients, destination);
+            return;
+        }
         PixelRow.Gather32(row, sourceWidth, destinationWidth, offsets, coefficients, destination,
             format == ImagePixelFormat.Rgba32);
     }
