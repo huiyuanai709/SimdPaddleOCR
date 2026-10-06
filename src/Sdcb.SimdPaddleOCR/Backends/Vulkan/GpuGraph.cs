@@ -24,22 +24,53 @@ internal sealed class GpuGraphModel
     internal static readonly VkBuffer RoleArena = new(), RoleIn = new(),
         RoleOut = new(), RolePart = new();
 
-    private static readonly ConditionalWeakTable<CompiledModel, GpuGraphModel> s_models = new();
+    // Keyed by model content, not object identity: each engine parses its own
+    // Model, and the weight buffers must be uploaded once per ONNX file.
+    private static readonly Dictionary<(ulong Key, VkDevice Device), GpuGraphModel> s_models = new();
     private int _refs;
 
-    /// <summary>Ref-counted shared model for (device, compiled); released by
-    /// <see cref="Release"/> when the last session goes away.</summary>
+    /// <summary>Ref-counted shared weights and schedules for one ONNX graph
+    /// on one device. Released by <see cref="Release"/> when the last session
+    /// goes away.</summary>
     internal static GpuGraphModel Acquire(VkDevice dev, CompiledModel compiled)
     {
+        ulong key = compiled.Model.ContentKey;
         lock (s_models)
         {
-            if (!s_models.TryGetValue(compiled, out GpuGraphModel? m) || m._refs == 0 || m._dev != dev)
+            var id = (key, dev);
+            if (!s_models.TryGetValue(id, out GpuGraphModel? m) || m._refs == 0)
             {
                 m = new GpuGraphModel(dev, compiled);
-                s_models.AddOrUpdate(compiled, m);
+                s_models[id] = m;
+                OcrVulkan.Debug($"vulkan graph new key={key:x16}");
+            }
+            else
+            {
+                if (m._compiled.Disposed)
+                {
+                    lock (m)
+                        m._compiled = compiled;
+                }
+                OcrVulkan.Debug($"vulkan graph reuse key={key:x16} refs={m._refs}");
             }
             m._refs++;
             return m;
+        }
+    }
+
+    /// <summary>
+    /// A session whose compiled model is still alive replaces a shared graph
+    /// that was built from an engine already disposed.
+    /// </summary>
+    internal void Use(CompiledModel compiled)
+    {
+        if (!compiled.Disposed && _compiled.Disposed)
+        {
+            lock (this)
+            {
+                if (_compiled.Disposed)
+                    _compiled = compiled;
+            }
         }
     }
 
@@ -48,8 +79,7 @@ internal sealed class GpuGraphModel
         lock (s_models)
         {
             if (--_refs > 0) return;
-            if (s_models.TryGetValue(_compiled, out GpuGraphModel? cur) && cur == this)
-                s_models.Remove(_compiled);
+            s_models.Remove((_key, _dev));
             lock (this)
             {
                 foreach (VkBuffer b in _allBufs) b.Free();
@@ -60,8 +90,9 @@ internal sealed class GpuGraphModel
     }
 
     private readonly VkDevice _dev;
+    private readonly ulong _key;
     private readonly Model _model;
-    private readonly CompiledModel _compiled;
+    private CompiledModel _compiled;
     internal VkDevice Device => _dev;
     internal VkPipeline OutPipe => _pOut;
 
@@ -192,6 +223,7 @@ internal sealed class GpuGraphModel
         _dev = dev;
         _compiled = compiled;
         _model = compiled.Model;
+        _key = _model.ContentKey;
         _nocm = !dev.CoopGemm;
         // sg16-only coopmat shaders: NVIDIA (sg 32-32) and AMD wave64 cannot
         // satisfy requiredSubgroupSize=16 — swap in the sg32 variant.

@@ -41,6 +41,66 @@ public sealed class Model : IDisposable
         _nodeParameters = nodeParameters;
     }
 
+    private ulong _contentKey;
+    private int _contentReady;
+
+    /// <summary>
+    /// Identity of the graph and its constant tensors. Two instances parsed
+    /// from the same ONNX share one GPU weight upload.
+    /// </summary>
+    internal ulong ContentKey
+    {
+        get
+        {
+            if (Volatile.Read(ref _contentReady) != 0)
+                return _contentKey;
+            ulong key = Fingerprint();
+            lock (this)
+            {
+                if (_contentReady == 0)
+                {
+                    _contentKey = key;
+                    Volatile.Write(ref _contentReady, 1);
+                }
+            }
+            return _contentKey;
+        }
+    }
+
+    private ulong Fingerprint()
+    {
+        ulong h = 14695981039346656037UL;
+        void Mix(ulong v)
+        {
+            h ^= v;
+            h *= 1099511628211UL;
+        }
+        Mix((ulong)Nodes.Length);
+        for (int i = 0; i < Nodes.Length; i++)
+            Mix((ulong)Nodes[i].Operator);
+        Mix((ulong)_tensorData.Length);
+        for (int i = 0; i < _tensorData.Length; i++)
+        {
+            ReadOnlySpan<byte> span = _tensorData[i];
+            Mix((ulong)span.Length);
+            int n = span.Length;
+            int o = 0;
+            while (o + 8 <= n)
+            {
+                Mix(BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(o, 8)));
+                o += 8;
+            }
+            if (o < n)
+            {
+                ulong tail = 0;
+                for (int shift = 0; o < n; o++, shift += 8)
+                    tail |= (ulong)span[o] << shift;
+                Mix(tail);
+            }
+        }
+        return h;
+    }
+
     public ModelInfo Info { get; }
     public IReadOnlyList<uint> GraphInputs { get; }
     public IReadOnlyList<uint> GraphOutputs { get; }

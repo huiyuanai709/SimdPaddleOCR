@@ -29,6 +29,7 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
     private int _hwVolume;
     private bool _disposed;
     private bool _gpuDead;   // plan/run failure → serve everything from _cpuFallback
+    private bool _oomLatched;
 
     // CTC projection resolution, cached per Reshape
     private bool _ctcResolved;
@@ -82,12 +83,12 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
         if (_gpuDead) return Cpu().RunInternal(CpuInput(input));
         try
         {
-            return _runner.Run(_shape, input);
+            ReadOnlySpan<float> result = _runner.Run(_shape, input);
+            _oomLatched = false;
+            return result;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (NoteGpuFailure(ex, "RunInternal"))
         {
-            Console.Error.WriteLine($"[{_logTag}] RunInternal fallback: {ex.GetType().Name} {ex.Message}");
-            _gpuDead = true;
             return Cpu().RunInternal(CpuInput(input));
         }
     }
@@ -104,11 +105,10 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
         try
         {
             act = _runner.Run(_shape, input, _ctcMatMulIndex, _ctcActTensor);
+            _oomLatched = false;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (NoteGpuFailure(ex, "CtcProj"))
         {
-            Console.Error.WriteLine($"[{_logTag}] CtcProj fallback: {ex.GetType().Name} {ex.Message}");
-            _gpuDead = true;
             return Cpu().TryRunUntilCtcProjection(CpuInput(input), out operands);
         }
         operands = new CtcProjectionOperands(act,
@@ -184,15 +184,43 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
         try
         {
             ok = _runner.RunMany(_many, _input.AsSpan(0, _manyVolume), _ctcMatMulIndex, _ctcActTensor, Forward);
+            if (ok) _oomLatched = false;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (NoteGpuFailure(ex, "RunMany"))
         {
-            Console.Error.WriteLine($"[{_logTag}] RunMany fallback: {ex.GetType().Name} {ex.Message}");
-            _gpuDead = true;
             return false;
         }
         consumerError?.Throw();
         return ok;
+    }
+
+    private bool NoteGpuFailure(Exception ex, string where)
+    {
+        if (IsDeviceOom(ex))
+        {
+            if (!_oomLatched)
+            {
+                _oomLatched = true;
+                OcrVulkan.Warn(
+                    $"Vulkan device memory exhausted ({where}: {ex.Message}); this image is running on CPU");
+            }
+            return true;
+        }
+        Console.Error.WriteLine($"[{_logTag}] {where} fallback: {ex.GetType().Name} {ex.Message}");
+        _gpuDead = true;
+        return true;
+    }
+
+    private static bool IsDeviceOom(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e.Message.Contains("ErrorOutOfDeviceMemory", StringComparison.Ordinal)
+                || e.Message.Contains("Vulkan arena cap", StringComparison.Ordinal)
+                || e.Message.Contains("Vulkan buffer cap", StringComparison.Ordinal))
+                return true;
+        }
+        return false;
     }
 
     private InferenceSession Cpu()

@@ -10,6 +10,13 @@ internal unsafe sealed class VkDevice : IDisposable
 {
     public IntPtr Instance, PhysDevice, Device, Queue;
     public string DeviceName = "";
+    public string DeviceKind = "";
+    public int DeviceIndex;
+    public ulong DeviceLocalBytes;
+    public ulong BufferCapBytes;
+    public ulong BufferCap => OcrVulkan.BufferByteCap(DeviceLocalBytes);
+    public OcrVulkan.VulkanDeviceInfo Info => new(
+        DeviceIndex, DeviceName, DeviceKind, DeviceLocalBytes, BufferCap, true);
     public uint VendorId;
     public uint SubgroupSize;         // actual subgroup size (lanes)
     public uint SubgroupOps;          // VkSubgroupFeatureFlags (SHUFFLE = 0x10)
@@ -66,7 +73,7 @@ internal unsafe sealed class VkDevice : IDisposable
         }
     }
 
-    public static VkDevice Create(uint deviceIndex = 0)
+    public static VkDevice Create(string? selector = null)
     {
         Vk.RegisterResolver();
         var d = new VkDevice();
@@ -85,22 +92,66 @@ internal unsafe sealed class VkDevice : IDisposable
         IntPtr* devs = stackalloc IntPtr[(int)ndev];
         Vk.Check(Vk.vkEnumeratePhysicalDevices(d.Instance, &ndev, devs), "enum physical devices");
 
-        // Prefer discrete GPU; honor deviceIndex as "the nth discrete first, else nth overall".
+        // Default: first discrete, then any non-CPU device, then a software
+        // device (lavapipe). An explicit index is the enumerate order. A
+        // name substring prefers a discrete match.
+        OcrVulkan.VulkanSelector want = OcrVulkan.ParseSelector(selector);
+        var listed = new OcrVulkan.VulkanDeviceInfo[(int)ndev];
         int chosen = -1;
-        for (int pass = 0; pass < 2 && chosen < 0; pass++)
+        int nameFallback = -1;
+        for (int i = 0; i < (int)ndev; i++)
         {
-            uint seen = 0;
-            for (int i = 0; i < (int)ndev; i++)
+            Vk.VkPhysicalDeviceProperties p;
+            Vk.vkGetPhysicalDeviceProperties(devs[i], &p);
+            string name = Marshal.PtrToStringAnsi((IntPtr)p.DeviceName) ?? "?";
+            string kind = KindOf(p.DeviceType);
+            listed[i] = new OcrVulkan.VulkanDeviceInfo(i, name, kind, 0, 0, false);
+            if (want.Index >= 0)
             {
-                Vk.VkPhysicalDeviceProperties p;
-                Vk.vkGetPhysicalDeviceProperties(devs[i], &p);
-                bool want = pass == 0 ? p.DeviceType == VkConst.PhysDeviceDiscrete : p.DeviceType != VkConst.PhysDeviceCpu;
-                if (!want) continue;
-                if (seen++ == deviceIndex) { chosen = i; break; }
+                if (i == want.Index) chosen = i;
+            }
+            else if (want.Name is not null)
+            {
+                if (name.Contains(want.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (p.DeviceType == VkConst.PhysDeviceDiscrete)
+                    {
+                        chosen = i;
+                        break;
+                    }
+                    if (nameFallback < 0) nameFallback = i;
+                }
             }
         }
-        if (chosen < 0) throw new PlatformNotSupportedException($"Vulkan: device index {deviceIndex} out of range ({ndev} devices)");
+        if (want.Name is not null && chosen < 0) chosen = nameFallback;
+        if (want.IsDefault)
+        {
+            for (int pass = 0; pass < 3 && chosen < 0; pass++)
+            {
+                for (int i = 0; i < (int)ndev; i++)
+                {
+                    Vk.VkPhysicalDeviceProperties p;
+                    Vk.vkGetPhysicalDeviceProperties(devs[i], &p);
+                    bool match = pass switch
+                    {
+                        0 => p.DeviceType == VkConst.PhysDeviceDiscrete,
+                        1 => p.DeviceType != VkConst.PhysDeviceCpu,
+                        _ => true,
+                    };
+                    if (!match) continue;
+                    chosen = i;
+                    break;
+                }
+            }
+        }
+        if (chosen < 0)
+        {
+            string names = string.Join(", ", listed.Select(x => $"[{x.Index}] {x.Name} ({x.Kind})"));
+            throw new PlatformNotSupportedException(
+                $"Vulkan: device selector '{selector}' matched nothing ({ndev} devices: {names})");
+        }
         d.PhysDevice = devs[chosen];
+        d.DeviceIndex = chosen;
 
         Vk.VkPhysicalDeviceProperties props;
         Vk.vkGetPhysicalDeviceProperties(d.PhysDevice, &props);
@@ -357,6 +408,31 @@ internal unsafe sealed class VkDevice : IDisposable
                 d.HostVisibleCoherentType = (uint)i;
         }
         d.CoherentDeviceLocal = d.DeviceLocalHostVisibleType != uint.MaxValue;
+        ulong local = 0;
+        for (int i = 0; i < (int)d.MemProps.MemoryHeapCount; i++)
+        {
+            Vk.VkMemoryHeap heap = d.MemProps.HeapAt(i);
+            if ((heap.Flags & VkConst.MemDeviceLocal) != 0)
+                local += heap.Size;
+        }
+        d.DeviceLocalBytes = local;
+        d.BufferCapBytes = OcrVulkan.BufferByteCap(local);
+        d.DeviceKind = KindOf(props.DeviceType);
+        for (int i = 0; i < listed.Length; i++)
+        {
+            ulong heapBytes = i == chosen ? local : 0;
+            listed[i] = listed[i] with
+            {
+                DeviceLocalBytes = heapBytes,
+                BufferByteCap = i == chosen ? d.BufferCapBytes : 0,
+                Selected = i == chosen,
+            };
+            OcrVulkan.Debug(
+                $"vulkan device[{i}] name={listed[i].Name} kind={listed[i].Kind} selected={listed[i].Selected}");
+        }
+        OcrVulkan.SetDevices(listed);
+        OcrVulkan.Debug(
+            $"vulkan selected name={d.DeviceName} kind={d.DeviceKind} index={d.DeviceIndex} deviceLocalBytes={d.DeviceLocalBytes} bufferCapBytes={d.BufferCapBytes}");
 
         Vk.VkCommandPoolCreateInfo cpci = new()
         {
@@ -377,6 +453,14 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.Check(Vk.vkCreateDescriptorPool(d.Device, &dpci, null, out d._descPool), "vkCreateDescriptorPool");
         return d;
     }
+
+    private static string KindOf(uint deviceType) => deviceType switch
+    {
+        VkConst.PhysDeviceIntegrated => "integrated",
+        VkConst.PhysDeviceDiscrete => "discrete",
+        VkConst.PhysDeviceCpu => "cpu",
+        _ => "other",
+    };
 
     /// <summary>Allocate a storage buffer. hostVisible=false prefers DEVICE_LOCAL;
     /// hostVisible=true prefers DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT (ReBAR zero-copy), falling
@@ -462,6 +546,8 @@ internal unsafe sealed class VkDevice : IDisposable
         Vk.Check(Vk.vkAllocateMemory(Device, &mai, null, out b.Memory), "vkAllocateMemory");
         Vk.Check(Vk.vkBindBufferMemory(Device, b.Buffer, b.Memory, 0), "vkBindBufferMemory");
         b.Flags = MemProps.TypeAt((int)memType).PropertyFlags;
+        b.Allocated = req.Size;
+        OcrVulkan.NoteAlloc(req.Size);
         return b;
     }
 
@@ -785,6 +871,7 @@ internal unsafe sealed class VkBuffer
 {
     public IntPtr Dev, Buffer, Memory;
     public ulong Size;
+    public ulong Allocated;
     public uint Flags;
 
     public bool HostCoherent => (Flags & VkConst.MemHostCoherent) != 0;
@@ -813,6 +900,12 @@ internal unsafe sealed class VkBuffer
     public void Free()
     {
         if (Buffer != IntPtr.Zero) { Vk.vkDestroyBuffer(Dev, Buffer, null); Buffer = IntPtr.Zero; }
-        if (Memory != IntPtr.Zero) { Vk.vkFreeMemory(Dev, Memory, null); Memory = IntPtr.Zero; }
+        if (Memory != IntPtr.Zero)
+        {
+            OcrVulkan.NoteFree(Allocated);
+            Vk.vkFreeMemory(Dev, Memory, null);
+            Memory = IntPtr.Zero;
+            Allocated = 0;
+        }
     }
 }

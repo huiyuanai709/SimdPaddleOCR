@@ -23,6 +23,7 @@ public sealed class CompiledModel
     private readonly int[]? _defaultInputShape;
     private readonly bool[] _nodeNhwc;
     private bool _disposed;
+    internal bool Disposed => _disposed;
 
     internal CompiledModel(Model model, int intraOpThreads)
     {
