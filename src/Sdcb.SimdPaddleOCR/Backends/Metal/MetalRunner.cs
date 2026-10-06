@@ -50,6 +50,7 @@ internal sealed class MetalSchedule
 internal sealed unsafe class MetalDetGraph : IOcrGraphRunner
 {
     private readonly MtlDevice _dev;
+    private readonly CompiledModel _compiled;
     private readonly MetalGraphModel _model;
     private MtlBuffer? _arena, _in, _out, _part;
     private long _arenaElems, _inElems, _outElems;
@@ -69,6 +70,7 @@ internal sealed unsafe class MetalDetGraph : IOcrGraphRunner
     public MetalDetGraph(MtlDevice dev, CompiledModel compiled)
     {
         _dev = dev;
+        _compiled = compiled;
         _model = MetalGraphModel.Acquire(dev, compiled);
     }
 
@@ -86,6 +88,7 @@ internal sealed unsafe class MetalDetGraph : IOcrGraphRunner
         int nodeLimit = int.MaxValue, int outTensor = -1)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _model.Use(_compiled);
         MetalSchedule s = _model.GetSchedule(inputShape, nodeLimit, outTensor);
         return RunCore([s], input, out _).AsSpan(0, s.OutElems);
     }
@@ -104,6 +107,7 @@ internal sealed unsafe class MetalDetGraph : IOcrGraphRunner
         int nodeLimit, int outTensor, CtcUnitsReady onReady)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _model.Use(_compiled);
         var sched = new MetalSchedule[shapes.Count];
         for (int i = 0; i < sched.Length; i++)
             sched[i] = _model.GetSchedule(shapes[i], nodeLimit, outTensor);
@@ -152,7 +156,8 @@ internal sealed unsafe class MetalDetGraph : IOcrGraphRunner
                 long need = (sched[i].ArenaElems + 127) & ~127L;
                 bool cut = ci < cuts.Length && cuts[ci] == i;
                 if (cut) ci++;
-                if (i > 0 && (cut || a + need > InterleaveArenaBudget)) { waveStart.Add(i); a = 0; }
+                long arenaBudget = Math.Min(InterleaveArenaBudget, (long)(_dev.BufferCap / 2));
+                if (i > 0 && (cut || a + need > arenaBudget)) { waveStart.Add(i); a = 0; }
                 arenaBase[i] = a;
                 a += need;
                 peak = Math.Max(peak, a);
@@ -308,40 +313,52 @@ internal sealed unsafe class MetalDetGraph : IOcrGraphRunner
     {
         if (_part is not null && units <= _partUnits) return;
         int alloc = Math.Max(units, _partUnits * 3 / 2);
+        ulong bytes = (ulong)alloc * (ulong)MetalGraphModel.PartBytes;
+        if (bytes > _dev.BufferCap)
+            throw new InvalidOperationException(
+                $"Metal buffer cap exceeded: partials need {bytes} bytes, cap {_dev.BufferCap} ({_dev.Name})");
+        // Allocate before disposing so a failed newBuffer keeps the old scratch.
+        MtlBuffer grown = _dev.NewBuffer((nuint)bytes);
         _part?.Dispose();
-        _part = null;
-        // se partial-sum scratch; contents are fully rewritten per run.
-        _part = _dev.NewBuffer((nuint)alloc * MetalGraphModel.PartBytes);
+        _part = grown;
         _partUnits = alloc;
     }
 
     private void EnsureBuffers(long arenaElems, long needIn, long needOut)
     {
+        ulong cap = _dev.BufferCap;
         if (_arena is null || arenaElems > _arenaElems)
         {
             long alloc = Math.Max(arenaElems, _arenaElems * 3 / 2);
+            ulong bytes = (ulong)alloc * 2;
+            if (bytes > cap)
+                throw new InvalidOperationException(
+                    $"Metal arena cap exceeded: need {bytes} bytes, cap {cap} ({_dev.Name})");
+            MtlBuffer grown = _dev.NewBuffer((nuint)bytes);
             _arena?.Dispose();
-            _arena = null;
-            _arena = _dev.NewBuffer((nuint)alloc * 2);
+            _arena = grown;
             _arenaElems = alloc;
         }
         // grow in power-of-two steps so a stream of varying DET sizes settles
         if (_in is null || needIn > _inElems)
-        {
-            long alloc = RoundUpPow2(needIn);
-            _in?.Dispose();
-            _in = _dev.NewBuffer((nuint)alloc * 4);
-            _inMap = (float*)_in.Contents;
-            _inElems = alloc;
-        }
+            GrowMapped(ref _in, ref _inMap, ref _inElems, needIn, cap);
         if (_out is null || needOut > _outElems)
-        {
-            long alloc = RoundUpPow2(needOut);
-            _out?.Dispose();
-            _out = _dev.NewBuffer((nuint)alloc * 4);
-            _outMap = (float*)_out.Contents;
-            _outElems = alloc;
-        }
+            GrowMapped(ref _out, ref _outMap, ref _outElems, needOut, cap);
+    }
+
+    private void GrowMapped(ref MtlBuffer? buf, ref float* map, ref long elems, long need, ulong cap)
+    {
+        long alloc = RoundUpPow2(need);
+        ulong bytes = (ulong)alloc * 4;
+        if (bytes > cap)
+            throw new InvalidOperationException(
+                $"Metal buffer cap exceeded: need {bytes} bytes, cap {cap} ({_dev.Name})");
+        MtlBuffer grown = _dev.NewBuffer((nuint)bytes);
+        float* grownMap = (float*)grown.Contents;
+        buf?.Dispose();
+        buf = grown;
+        map = grownMap;
+        elems = alloc;
     }
 
     private MtlBuffer Resolve(MtlBuffer b) =>

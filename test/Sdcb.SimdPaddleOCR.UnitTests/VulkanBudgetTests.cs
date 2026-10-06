@@ -1,3 +1,5 @@
+using Sdcb.SimdPaddleOCR.Backends.Metal;
+
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
 public class VulkanBudgetTests
@@ -78,4 +80,30 @@ public class VulkanBudgetTests
     [InlineData(0UL, 2, 2)]
     public void SmallHeapsRecommendOneEngine(ulong deviceLocal, int requested, int expected) =>
         Assert.Equal(expected, OcrVulkan.RecommendedEngineCount(deviceLocal, requested));
+}
+
+public class MetalShaderTests
+{
+    [Fact]
+    public void EmbeddedShadersMatchTheAotPreserveList()
+    {
+        var assembly = typeof(OcrBackend).Assembly;
+        string[] embedded = assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith("Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.", StringComparison.Ordinal)
+                           && name.EndsWith(".metal", StringComparison.Ordinal))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        string[] listed = MetalShaders.Names.OrderBy(name => name, StringComparer.Ordinal).ToArray();
+        Assert.Equal(listed, embedded);
+        string source = MetalShaders.LoadSource(assembly);
+        Assert.Contains("kernel", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProbeIsNullOffMacOs()
+    {
+        if (OperatingSystem.IsMacOS())
+            return;
+        Assert.Null(OcrMetal.TryProbe());
+    }
 }

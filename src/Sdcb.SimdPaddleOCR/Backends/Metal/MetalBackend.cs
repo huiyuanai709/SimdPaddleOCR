@@ -76,7 +76,10 @@ internal static class MetalBackend
                     Console.Error.WriteLine($"[metal] device: {dev.Name}");
                 return new MetalSession(dev, compiled);
             }
-            catch { /* fall through to CPU */ }
+            catch (Exception ex)
+            {
+                OcrMetal.NoteSessionFallback(ex);
+            }
         }
         return compiled.CreateRequest();
     }

@@ -202,7 +202,7 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
             {
                 _oomLatched = true;
                 OcrVulkan.Warn(
-                    $"Vulkan device memory exhausted ({where}: {ex.Message}); this image is running on CPU");
+                    $"{OomKind(ex)} device memory exhausted ({where}: {ex.Message}); this image is running on CPU");
             }
             return true;
         }
@@ -217,10 +217,25 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
         {
             if (e.Message.Contains("ErrorOutOfDeviceMemory", StringComparison.Ordinal)
                 || e.Message.Contains("Vulkan arena cap", StringComparison.Ordinal)
-                || e.Message.Contains("Vulkan buffer cap", StringComparison.Ordinal))
+                || e.Message.Contains("Vulkan buffer cap", StringComparison.Ordinal)
+                || e.Message.Contains("Metal arena cap", StringComparison.Ordinal)
+                || e.Message.Contains("Metal buffer cap", StringComparison.Ordinal)
+                || e.Message.Contains("newBufferWithLength", StringComparison.Ordinal)
+                || e.Message.Contains("newBufferWithBytes", StringComparison.Ordinal))
                 return true;
         }
         return false;
+    }
+
+    private static string OomKind(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e.Message.Contains("Metal", StringComparison.Ordinal)
+                || e.Message.Contains("newBufferWith", StringComparison.Ordinal))
+                return "Metal";
+        }
+        return "Vulkan";
     }
 
     private InferenceSession Cpu()
