@@ -1,4 +1,6 @@
+#if !USE_NS20_LIBRARY
 using Sdcb.SimdPaddleOCR.Backends.Metal;
+#endif
 
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
@@ -82,6 +84,7 @@ public class VulkanBudgetTests
         Assert.Equal(expected, OcrVulkan.RecommendedEngineCount(deviceLocal, requested));
 }
 
+#if !USE_NS20_LIBRARY
 public class MetalShaderTests
 {
     [Fact]
@@ -107,3 +110,4 @@ public class MetalShaderTests
         Assert.Null(OcrMetal.TryProbe());
     }
 }
+#endif
