@@ -21,6 +21,9 @@
     <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Small\Sdcb.SimdPaddleOCR.Models.ChineseV6Small.csproj" />
     <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Medium\Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.csproj" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+    <PackageReference Include="SkiaSharp" Version="4.151.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="4.151.1" Condition="'$(OS)' != 'Windows_NT'" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="4.151.1" Condition="'$(OS)' == 'Windows_NT'" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseNs20Library)' == 'true'">
     <!-- SetTargetFramework does not flow ns2.0 PackageReferences into the net11 host deps.json. -->

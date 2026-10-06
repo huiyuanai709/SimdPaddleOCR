@@ -20,12 +20,19 @@ public enum ImagePixelFormat
     Bgra32 = 2,
     /// <summary>4 bytes, R,G,B,A. Alpha ignored. ImageSharp <c>Rgba32</c>.</summary>
     Rgba32 = 3,
+    /// <summary>
+    /// 1 byte per pixel. Treated as B = G = R, which is what a grayscale scan
+    /// looks like after it has been expanded to BGR. DET still applies the
+    /// per-channel ImageNet scales, so the tensor matches that expansion.
+    /// </summary>
+    Gray8 = 4,
 }
 
 internal static class ImagePixels
 {
     internal static int BytesPerPixel(ImagePixelFormat format) => format switch
     {
+        ImagePixelFormat.Gray8 => 1,
         ImagePixelFormat.Bgr24 or ImagePixelFormat.Rgb24 => 3,
         ImagePixelFormat.Bgra32 or ImagePixelFormat.Rgba32 => 4,
         _ => throw new ArgumentOutOfRangeException(nameof(format)),
