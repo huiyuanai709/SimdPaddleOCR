@@ -48,6 +48,7 @@ internal sealed class GpuSchedule
 internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
 {
     private readonly VkDevice _dev;
+    private readonly CompiledModel _compiled;
     private readonly GpuGraphModel _model;
     private IntPtr _pool, _descPool;
     private readonly List<IntPtr> _cmds = [], _fences = [];
@@ -72,6 +73,7 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
     public GpuDetGraph(VkDevice dev, CompiledModel compiled)
     {
         _dev = dev;
+        _compiled = compiled;
         _model = GpuGraphModel.Acquire(dev, compiled);
         try
         {
@@ -108,6 +110,7 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
         int nodeLimit = int.MaxValue, int outTensor = -1)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _model.Use(_compiled);
         GpuSchedule s = _model.GetSchedule(inputShape, nodeLimit, outTensor);
         return RunCore([s], input, out _).AsSpan(0, s.OutElems);
     }
@@ -126,6 +129,7 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
         int nodeLimit, int outTensor, CtcUnitsReady onReady)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _model.Use(_compiled);
         var sched = new GpuSchedule[shapes.Count];
         for (int i = 0; i < sched.Length; i++)
             sched[i] = _model.GetSchedule(shapes[i], nodeLimit, outTensor);
@@ -183,7 +187,8 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
                 long need = (sched[i].ArenaElems + 127) & ~127L;
                 bool cut = ci < cuts.Length && cuts[ci] == i;
                 if (cut) ci++;
-                if (i > 0 && (cut || a + need > InterleaveArenaBudget)) { waveStart.Add(i); a = 0; }
+                long arenaBudget = Math.Min(InterleaveArenaBudget, (long)(_dev.BufferCap / 2));
+                if (i > 0 && (cut || a + need > arenaBudget)) { waveStart.Add(i); a = 0; }
                 arenaBase[i] = a;
                 a += need;
                 peak = Math.Max(peak, a);
@@ -321,42 +326,55 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
     {
         if (_part is not null && units <= _partUnits) return;
         int alloc = Math.Max(units, _partUnits * 3 / 2);
+        ulong bytes = (ulong)alloc * GpuGraphModel.PartBytes;
+        if (bytes > _dev.BufferCap)
+            throw new InvalidOperationException(
+                $"Vulkan buffer cap exceeded: partials need {bytes} bytes, cap {_dev.BufferCap} ({_dev.DeviceName})");
+        VkBuffer grown = _dev.NewStorageBuffer(bytes, hostVisible: false);
+        _dev.Zero(grown);
         _part?.Free();
-        _part = null;
-        // zeroed once: se_fused ticket counters self-reset after each run
-        _part = _dev.NewStorageBuffer((ulong)alloc * GpuGraphModel.PartBytes, hostVisible: false);
-        _dev.Zero(_part);
+        _part = grown;
         _partUnits = alloc;
     }
 
     private void EnsureBuffers(long arenaElems, long needIn, long needOut)
     {
+        ulong cap = _dev.BufferCap;
         if (_arena is null || arenaElems > _arenaElems)
         {
             long alloc = Math.Max(arenaElems, _arenaElems * 3 / 2);
+            ulong bytes = (ulong)alloc * 2;
+            if (bytes > cap)
+                throw new InvalidOperationException(
+                    $"Vulkan arena cap exceeded: need {bytes} bytes, cap {cap} ({_dev.DeviceName})");
+            // Allocate the replacement before freeing the old one so a failed
+            // vkAllocateMemory leaves the previous arena in place.
+            VkBuffer grown = _dev.NewStorageBuffer(bytes, hostVisible: false);
             _arena?.Free();
-            _arena = null;
-            _arena = _dev.NewStorageBuffer((ulong)alloc * 2, hostVisible: false);
+            _arena = grown;
             _arenaElems = alloc;
         }
         // host-visible reallocation + map costs ~20 ms: grow in power-of-two
         // steps so a stream of varying DET sizes settles after a few images
         if (_in is null || needIn > _inElems)
-        {
-            long alloc = RoundUpPow2(needIn);
-            FreeMapped(ref _in, ref _inMap);
-            _in = _dev.NewStorageBuffer((ulong)alloc * 4, hostVisible: true, preferHost: false);
-            _inMap = (float*)_in.Map();
-            _inElems = alloc;
-        }
+            GrowMapped(ref _in, ref _inMap, ref _inElems, needIn, preferHost: false, cap);
         if (_out is null || needOut > _outElems)
-        {
-            long alloc = RoundUpPow2(needOut);
-            FreeMapped(ref _out, ref _outMap);
-            _out = _dev.NewStorageBuffer((ulong)alloc * 4, hostVisible: true, preferHost: true);
-            _outMap = (float*)_out.Map();
-            _outElems = alloc;
-        }
+            GrowMapped(ref _out, ref _outMap, ref _outElems, needOut, preferHost: true, cap);
+    }
+
+    private void GrowMapped(ref VkBuffer? buf, ref float* map, ref long elems, long need, bool preferHost, ulong cap)
+    {
+        long alloc = RoundUpPow2(need);
+        ulong bytes = (ulong)alloc * 4;
+        if (bytes > cap)
+            throw new InvalidOperationException(
+                $"Vulkan buffer cap exceeded: need {bytes} bytes, cap {cap} ({_dev.DeviceName})");
+        VkBuffer grown = _dev.NewStorageBuffer(bytes, hostVisible: true, preferHost: preferHost);
+        float* grownMap = (float*)grown.Map();
+        FreeMapped(ref buf, ref map);
+        buf = grown;
+        map = grownMap;
+        elems = alloc;
     }
 
     private static void FreeMapped(ref VkBuffer? buf, ref float* map)

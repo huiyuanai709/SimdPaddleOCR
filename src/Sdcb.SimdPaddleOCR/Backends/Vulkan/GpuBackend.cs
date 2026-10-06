@@ -20,7 +20,7 @@ internal static class GpuBackend
         lock (s_probeLock)
         {
             if (s_probed) return s_device;
-            try { s_device = VkDevice.Create(); }
+            try { s_device = VkDevice.Create(OcrVulkan.EffectiveSelector); }
             catch { s_device = null; }
             s_probed = true;
             return s_device;
