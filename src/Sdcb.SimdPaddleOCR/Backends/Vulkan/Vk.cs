@@ -450,6 +450,50 @@ internal static unsafe partial class Vk
         public IntPtr Buffer; public ulong Offset, Size;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkPipelineCacheCreateInfo
+    {
+        public uint SType; public void* PNext; public uint Flags;
+        public nuint InitialDataSize; public void* PInitialData;
+    }
+
+    [LibraryImport(LibName)] public static partial VkResult vkCreatePipelineCache(IntPtr device, VkPipelineCacheCreateInfo* ci, void* alloc, out IntPtr cache);
+    [LibraryImport(LibName)] public static partial void vkDestroyPipelineCache(IntPtr device, IntPtr cache, void* alloc);
+    [LibraryImport(LibName)] public static partial VkResult vkGetPipelineCacheData(IntPtr device, IntPtr cache, nuint* dataSize, void* data);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkPhysicalDeviceExternalFenceInfo
+    {
+        public uint SType; public void* PNext; public uint HandleType;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkExternalFenceProperties
+    {
+        public uint SType; public void* PNext;
+        public uint ExportFromImportedHandleTypes;
+        public uint CompatibleHandleTypes;
+        public uint ExternalFenceFeatures;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkExportFenceCreateInfo
+    {
+        public uint SType; public void* PNext; public uint HandleTypes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkFenceGetWin32HandleInfoKHR
+    {
+        public uint SType; public void* PNext; public IntPtr Fence; public uint HandleType;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VkFenceGetFdInfoKHR
+    {
+        public uint SType; public void* PNext; public IntPtr Fence; public uint HandleType;
+    }
+
     [LibraryImport(LibName)] public static partial VkResult vkQueueSubmit(IntPtr queue, uint submitCount, VkSubmitInfo* submits, IntPtr fence);
     [LibraryImport(LibName)] public static partial VkResult vkCreateFence(IntPtr device, VkFenceCreateInfo* ci, void* alloc, out IntPtr fence);
     [LibraryImport(LibName)] public static partial VkResult vkWaitForFences(IntPtr device, uint count, IntPtr* fences, uint waitAll, ulong timeout);
@@ -488,7 +532,16 @@ internal static class VkConst
     public const uint StBufferCreateInfo = 12;
     public const uint StShaderModuleCreateInfo = 16;
     public const uint StPipelineShaderStageCreateInfo = 18;
+    public const uint StPipelineCacheCreateInfo = 17;
     public const uint StComputePipelineCreateInfo = 29;
+    public const uint StPhysicalDeviceExternalFenceInfo = 1000112000u;
+    public const uint StExternalFenceProperties = 1000112001u;
+    public const uint StExportFenceCreateInfo = 1000113000u;
+    public const uint StFenceGetWin32HandleInfoKHR = 1000114002u;
+    public const uint StFenceGetFdInfoKHR = 1000115001u;
+    public const uint ExternalFenceOpaqueWin32 = 0x2;
+    public const uint ExternalFenceSyncFd = 0x8;
+    public const uint ExternalFenceExportable = 0x1;
     public const uint StPipelineLayoutCreateInfo = 30;
     public const uint StDescriptorSetLayoutCreateInfo = 32;
     public const uint StDescriptorPoolCreateInfo = 33;

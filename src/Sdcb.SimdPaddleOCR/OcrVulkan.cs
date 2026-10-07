@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 
 namespace Sdcb.SimdPaddleOCR;
@@ -143,4 +144,184 @@ public static class OcrVulkan
         try { sink(message); }
         catch { Console.Error.WriteLine(message); }
     }
+
+    /// <summary>
+    /// Directory for the on-disk Vulkan pipeline cache. Empty uses
+    /// <c>%LOCALAPPDATA%/Sdcb.SimdPaddleOCR/vulkan-pipeline-cache</c>
+    /// (or the platform local-app-data folder). Set
+    /// <c>SIMD_OCR_VK_PIPELINE_CACHE</c> to <c>0</c> to disable, or to a
+    /// directory to override this property.
+    /// </summary>
+    public static string? PipelineCacheDirectory { get; set; }
+
+    public static bool PipelineCacheDisabled
+    {
+        get
+        {
+            string? env = Environment.GetEnvironmentVariable("SIMD_OCR_VK_PIPELINE_CACHE");
+            return env is "0" or "off" or "false" or "no";
+        }
+    }
+
+    public static string ResolvePipelineCacheDirectory()
+    {
+        string? env = Environment.GetEnvironmentVariable("SIMD_OCR_VK_PIPELINE_CACHE");
+        if (!string.IsNullOrWhiteSpace(env)
+            && !PipelineCacheDisabled
+            && env is not "1" and not "on" and not "true")
+            return env;
+        if (!string.IsNullOrWhiteSpace(PipelineCacheDirectory))
+            return PipelineCacheDirectory!;
+        string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(root))
+            root = Path.GetTempPath();
+        return Path.Combine(root, "Sdcb.SimdPaddleOCR", "vulkan-pipeline-cache");
+    }
+
+    /// <summary>File name keyed by vendor, device, driver version, and pipelineCacheUUID.</summary>
+    public static string PipelineCacheFileName(uint vendorId, uint deviceId, uint driverVersion, ReadOnlySpan<byte> uuid)
+    {
+        char[] hex = new char[uuid.Length * 2];
+        for (int i = 0; i < uuid.Length; i++)
+        {
+            byte b = uuid[i];
+            hex[i * 2] = "0123456789abcdef"[b >> 4];
+            hex[i * 2 + 1] = "0123456789abcdef"[b & 0xF];
+        }
+        return $"v{vendorId:x8}-d{deviceId:x8}-drv{driverVersion:x8}-{new string(hex)}.bin";
+    }
+
+    private static long s_submitTicks, s_waitTicks, s_preTicks, s_postTicks, s_initTicks;
+    private static long s_gpuRuns, s_fallbackRuns;
+    private static string s_deviceName = "";
+    private static string s_fenceWait = "none";
+    private static string s_cachePath = "";
+    private static int s_cacheRestored;
+
+    public static string DeviceName => s_deviceName;
+    public static string FenceWait => s_fenceWait;
+    public static string PipelineCachePath => s_cachePath;
+    public static bool PipelineCacheRestored => s_cacheRestored != 0;
+    public static long GpuRuns => Interlocked.Read(ref s_gpuRuns);
+    public static long CpuFallbackRuns => Interlocked.Read(ref s_fallbackRuns);
+    public static double InitMs => TicksToMs(Interlocked.Read(ref s_initTicks));
+
+    public readonly record struct GpuTimingSnapshot(
+        double GpuSubmitMs,
+        double GpuWaitMs,
+        double CpuPreMs,
+        double CpuPostMs,
+        long GpuRuns,
+        long CpuFallbackRuns,
+        double InitMs,
+        string DeviceName,
+        string FenceWait);
+
+    public static GpuTimingSnapshot ReadTimings() => new(
+        TicksToMs(Interlocked.Read(ref s_submitTicks)),
+        TicksToMs(Interlocked.Read(ref s_waitTicks)),
+        TicksToMs(Interlocked.Read(ref s_preTicks)),
+        TicksToMs(Interlocked.Read(ref s_postTicks)),
+        Interlocked.Read(ref s_gpuRuns),
+        Interlocked.Read(ref s_fallbackRuns),
+        InitMs,
+        s_deviceName,
+        s_fenceWait);
+
+    /// <summary>
+    /// Tracks one OCR call, including work that hops to the thread pool.
+    /// A page that used the GPU and also fell back counts as a fallback.
+    /// </summary>
+    public sealed class GpuCallScope : IDisposable
+    {
+        internal sealed class Box
+        {
+            public int Gpu, Fallback;
+            public long Submit, Wait, Pre, Post;
+        }
+
+        private static readonly AsyncLocal<Box?> s_current = new();
+        private readonly Box _box;
+        private readonly Box? _previous;
+        private bool _disposed;
+
+        private GpuCallScope(Box box, Box? previous)
+        {
+            _box = box;
+            _previous = previous;
+        }
+
+        public static GpuCallScope Begin()
+        {
+            Box box = new();
+            Box? previous = s_current.Value;
+            s_current.Value = box;
+            return new GpuCallScope(box, previous);
+        }
+
+        internal static Box? Current => s_current.Value;
+        public bool UsedGpu => Volatile.Read(ref _box.Gpu) != 0;
+        public bool UsedFallback => Volatile.Read(ref _box.Fallback) != 0;
+        public long SubmitTicks => Interlocked.Read(ref _box.Submit);
+        public long WaitTicks => Interlocked.Read(ref _box.Wait);
+        public long PreTicks => Interlocked.Read(ref _box.Pre);
+        public long PostTicks => Interlocked.Read(ref _box.Post);
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            s_current.Value = _previous;
+        }
+    }
+
+    internal static void AddGpuRun()
+    {
+        Interlocked.Increment(ref s_gpuRuns);
+        GpuCallScope.Box? box = GpuCallScope.Current;
+        if (box is not null) Interlocked.Increment(ref box.Gpu);
+    }
+
+    internal static void AddFallback()
+    {
+        Interlocked.Increment(ref s_fallbackRuns);
+        GpuCallScope.Box? box = GpuCallScope.Current;
+        if (box is not null) Interlocked.Increment(ref box.Fallback);
+    }
+
+    internal static void AddSubmitTicks(long ticks) => AddPair(ref s_submitTicks, ticks, static (b, t) => Interlocked.Add(ref b.Submit, t));
+    internal static void AddWaitTicks(long ticks) => AddPair(ref s_waitTicks, ticks, static (b, t) => Interlocked.Add(ref b.Wait, t));
+    internal static void AddCpuTicks(long pre, long post)
+    {
+        if (pre != 0) AddPair(ref s_preTicks, pre, static (b, t) => Interlocked.Add(ref b.Pre, t));
+        if (post != 0) AddPair(ref s_postTicks, post, static (b, t) => Interlocked.Add(ref b.Post, t));
+    }
+
+    internal static void AddInitTicks(long ticks)
+    {
+        if (ticks > 0) Interlocked.Add(ref s_initTicks, ticks);
+    }
+
+    internal static void NoteDevice(string name, string fenceWait)
+    {
+        if (!string.IsNullOrEmpty(name)) s_deviceName = name;
+        if (!string.IsNullOrEmpty(fenceWait)) s_fenceWait = fenceWait;
+    }
+
+    internal static void NotePipelineCache(string path, bool restored)
+    {
+        s_cachePath = path;
+        if (restored) s_cacheRestored = 1;
+    }
+
+    private static void AddPair(ref long global, long ticks, Action<GpuCallScope.Box, long> intoCall)
+    {
+        if (ticks == 0) return;
+        Interlocked.Add(ref global, ticks);
+        GpuCallScope.Box? box = GpuCallScope.Current;
+        if (box is not null) intoCall(box, ticks);
+    }
+
+    private static double TicksToMs(long ticks) =>
+        ticks <= 0 || Stopwatch.Frequency <= 0 ? 0 : ticks * 1000.0 / Stopwatch.Frequency;
 }

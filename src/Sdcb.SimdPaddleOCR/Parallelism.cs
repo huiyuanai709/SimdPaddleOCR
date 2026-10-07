@@ -44,6 +44,22 @@ internal static class Parallelism
         return MathCompat.Clamp(Math.Max(lines, Math.Min(cpu, MaxAutoCropWorkers)), 1, MaxAutoCropWorkers);
     }
 
+    /// <summary>
+    /// Crop threads for a GPU engine. The perspective transform stays on the
+    /// CPU, but each engine must not take every core: two engines would
+    /// otherwise schedule 2×ProcessorCount crop threads while the GPU waits.
+    /// </summary>
+    public static int ResolveGpuCropWorkers(int lineWorkerCount) =>
+        ResolveGpuCropWorkers(lineWorkerCount, Environment.ProcessorCount);
+
+    public static int ResolveGpuCropWorkers(int lineWorkerCount, int processorCount)
+    {
+        int cpu = Math.Max(1, processorCount);
+        int lines = ResolveLineWorkers(lineWorkerCount, cpu);
+        int cap = Math.Min(4, Math.Max(2, cpu / 2));
+        return MathCompat.Clamp(Math.Max(lines, Math.Min(cap, cpu)), 1, 4);
+    }
+
     public static int ResolveRecognizerIntraOp(int lineWorkers) =>
         ResolveRecognizerIntraOp(lineWorkers, Environment.ProcessorCount);
 

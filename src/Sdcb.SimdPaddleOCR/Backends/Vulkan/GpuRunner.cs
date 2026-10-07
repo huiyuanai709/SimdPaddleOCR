@@ -164,6 +164,8 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
             arena = Math.Max(arena, sched[i].ArenaElems);
         }
         if (n == 1) inTotal = Math.Max(inTotal, input.Length);
+        long cpuPre = 0, cpuPost = 0;
+        long phase = Stopwatch.GetTimestamp();
         // Several units: record them level-interleaved — dispatch k of every
         // unit, then ONE barrier. Units are independent (own arena, in/out and
         // partials regions), so they run concurrently on the GPU (occupancy
@@ -208,6 +210,8 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
                 consumed += len;
             }
         _in!.Flush(0, (ulong)inTotal * 4);
+        cpuPre += Stopwatch.GetTimestamp() - phase;
+        phase = Stopwatch.GetTimestamp();
         long t1 = Stopwatch.GetTimestamp();
 
         EnsurePart(interleave ? maxWave : 1);
@@ -246,7 +250,9 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
                         RecordRecs(cmd, Selected(sched[i]), s_prof && n == 1, !s_noBar,
                             (ulong)inBase[i] * 4, (ulong)outBase[i] * 4);
                 Vk.Check(Vk.vkEndCommandBuffer(cmd), "end");
+                cpuPre += Stopwatch.GetTimestamp() - phase;
                 _dev.Submit(cmd, _fences[w]);
+                phase = Stopwatch.GetTimestamp();
                 submitted++;
             }
             t2 = Stopwatch.GetTimestamp();
@@ -255,6 +261,7 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
             {
                 _dev.WaitFence(_fences[w]);
                 drained++;
+                phase = Stopwatch.GetTimestamp();
                 int s0 = waveStart[w], s1 = waveStart[w + 1];
                 ulong lo = (ulong)outBase[s0] * 4;
                 _out!.Invalidate(lo, (ulong)Align64(outBase[s1 - 1] + sched[s1 - 1].OutElems) * 4 - lo);
@@ -264,6 +271,8 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
                 long tsk = s_dbgTime ? Stopwatch.GetTimestamp() : 0;
                 if (sink is not null && more) more = sink(result, outOffsets, s0, s1 - s0);
                 if (s_dbgTime) _dbgSink += Stopwatch.GetTimestamp() - tsk;
+                cpuPost += Stopwatch.GetTimestamp() - phase;
+                phase = Stopwatch.GetTimestamp();
             }
         }
         finally
@@ -271,6 +280,9 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
             // never leave a submission in flight over buffers the next run reuses
             for (int w = drained; w < submitted; w++)
                 try { _dev.WaitFence(_fences[w]); } catch (InvalidOperationException) { }
+            OcrVulkan.AddCpuTicks(cpuPre, cpuPost);
+            cpuPre = 0;
+            cpuPost = 0;
         }
         t3 = Stopwatch.GetTimestamp();
         if (s_prof && n == 1) AccumulateProfile(sched[0]);

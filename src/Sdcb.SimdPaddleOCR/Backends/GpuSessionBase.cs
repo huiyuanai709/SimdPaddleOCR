@@ -80,11 +80,16 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
     public ReadOnlySpan<float> RunInternal(ReadOnlySpan<float> input)
     {
         if (_disposed) throw new ObjectDisposedException(GetType().Name);
-        if (_gpuDead) return Cpu().RunInternal(CpuInput(input));
+        if (_gpuDead)
+        {
+            OcrVulkan.AddFallback();
+            return Cpu().RunInternal(CpuInput(input));
+        }
         try
         {
             ReadOnlySpan<float> result = _runner.Run(_shape, input);
             _oomLatched = false;
+            OcrVulkan.AddGpuRun();
             return result;
         }
         catch (Exception ex) when (NoteGpuFailure(ex, "RunInternal"))
@@ -97,7 +102,11 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
     {
         operands = default;
         if (_disposed) throw new ObjectDisposedException(GetType().Name);
-        if (_gpuDead) return Cpu().TryRunUntilCtcProjection(CpuInput(input), out operands);
+        if (_gpuDead)
+        {
+            OcrVulkan.AddFallback();
+            return Cpu().TryRunUntilCtcProjection(CpuInput(input), out operands);
+        }
         ResolveCtcProjection();
         if (_ctcMatMulIndex < 0) return false;
 
@@ -106,6 +115,7 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
         {
             act = _runner.Run(_shape, input, _ctcMatMulIndex, _ctcActTensor);
             _oomLatched = false;
+            OcrVulkan.AddGpuRun();
         }
         catch (Exception ex) when (NoteGpuFailure(ex, "CtcProj"))
         {
@@ -165,6 +175,11 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
 
     public bool TryRunManyUntilCtcProjection(CtcUnitsReady onReady)
     {
+        if (_gpuDead)
+        {
+            OcrVulkan.AddFallback();
+            return false;
+        }
         if (!CanRunMany || _many.Length == 0) return false;
         ResolveCtcProjection();
         if (_ctcMatMulIndex < 0) return false;
@@ -184,7 +199,11 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
         try
         {
             ok = _runner.RunMany(_many, _input.AsSpan(0, _manyVolume), _ctcMatMulIndex, _ctcActTensor, Forward);
-            if (ok) _oomLatched = false;
+            if (ok)
+            {
+                _oomLatched = false;
+                OcrVulkan.AddGpuRun();
+            }
         }
         catch (Exception ex) when (NoteGpuFailure(ex, "RunMany"))
         {
@@ -204,10 +223,12 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
                 OcrVulkan.Warn(
                     $"{OomKind(ex)} device memory exhausted ({where}: {ex.Message}); this image is running on CPU");
             }
+            OcrVulkan.AddFallback();
             return true;
         }
         Console.Error.WriteLine($"[{_logTag}] {where} fallback: {ex.GetType().Name} {ex.Message}");
         _gpuDead = true;
+        OcrVulkan.AddFallback();
         return true;
     }
 

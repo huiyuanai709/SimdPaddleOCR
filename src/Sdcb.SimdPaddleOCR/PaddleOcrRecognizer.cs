@@ -678,6 +678,47 @@ public sealed class PaddleOcrRecognizer : IDisposable
         return checked((int)bucket);
     }
 
+    /// <summary>
+    /// Build recognizer schedules and grow the session arena for common
+    /// line widths. Outputs are discarded. Batch 1 and the caller's batch
+    /// cap are both warmed because the schedule key includes N.
+    /// </summary>
+    internal void Warmup(int maxBatch)
+    {
+        if (_disposed) return;
+        int batch = MathCompat.Clamp(maxBatch, 1, 32);
+        int[] widths = [32, 64, 96, 128, 192, 256, 320, 384, 512, 640, 768, 1024];
+        int[] batches = batch == 1 ? [1] : [1, batch];
+        foreach (int n in batches)
+        {
+            foreach (int w in widths)
+            {
+                int volume = checked(n * 3 * 48 * w);
+                IOcrSession session = RentSessionForVolume(volume);
+                session.PlanForCtcProjection = true;
+                try
+                {
+                    if (session is IBatchedCtcSession batched && batched.CanRunMany)
+                    {
+                        Span<float> input = batched.ReshapeMany([new[] { n, 3, 48, w }]);
+                        input.Clear();
+                        batched.TryRunManyUntilCtcProjection(static (_, _, _, _) => true);
+                    }
+                    else
+                    {
+                        session.Reshape([n, 3, 48, w]);
+                        session.InputData.Clear();
+                        _ = session.RunInternal(session.InputData);
+                    }
+                }
+                finally
+                {
+                    ReturnSession(session);
+                }
+            }
+        }
+    }
+
     public void Dispose()
     {
         IOcrSession[] draining;
