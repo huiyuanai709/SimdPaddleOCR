@@ -34,4 +34,12 @@ public class ParallelismTests
     [InlineData(1, 32, 8)]
     public void ResolveRecognizerIntraOp(int lineWorkers, int processorCount, int expected) =>
         Assert.Equal(expected, Parallelism.ResolveRecognizerIntraOp(lineWorkers, processorCount));
+
+    [Theory]
+    [InlineData(2, 12, 4)]
+    [InlineData(2, 4, 2)]
+    [InlineData(1, 2, 2)]
+    [InlineData(1, 1, 1)]
+    public void ResolveGpuCropWorkers_StaysAtMostFour(int lineWorkers, int processorCount, int expected) =>
+        Assert.Equal(expected, Parallelism.ResolveGpuCropWorkers(lineWorkers, processorCount));
 }

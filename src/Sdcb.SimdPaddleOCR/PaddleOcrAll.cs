@@ -119,7 +119,12 @@ public sealed class PaddleOcrAll : IDisposable
         if (_options.UseDirectionClassification && classifierModel is null)
             throw new ArgumentNullException(nameof(classifierModel));
         _lineWorkers = Parallelism.ResolveLineWorkers(_options.LineWorkerCount);
-        _cropWorkers = Parallelism.ResolveCropWorkers(_options.LineWorkerCount);
+        _recGpu = OnnxSharp.OcrSessionFactory.IsGpuBackend(_options.Recognizer.Backend);
+        // GPU recognition is one queued submission. Crop still runs on the CPU,
+        // but it must not fan out to every core on each engine.
+        _cropWorkers = _recGpu
+            ? Parallelism.ResolveGpuCropWorkers(_options.LineWorkerCount)
+            : Parallelism.ResolveCropWorkers(_options.LineWorkerCount);
         _detector = new PaddleOcrDetector(detectorModel ?? throw new ArgumentNullException(nameof(detectorModel)), _options.Detector,
             ResolveDetectorIntraThreads(_options));
         _classifier = classifierModel is null ? null : new PaddleOcrClassifier(classifierModel, _options.Classifier);
@@ -143,9 +148,44 @@ public sealed class PaddleOcrAll : IDisposable
         _recognizer = new PaddleOcrRecognizer(recognizerModel ?? throw new ArgumentNullException(nameof(recognizerModel)),
             dictionaryUtf8, _options.Recognizer, ownsModel: false,
             _recIntraOpBase);
-        _recGpu = OnnxSharp.OcrSessionFactory.IsGpuBackend(_options.Recognizer.Backend);
         _recBatchEffective = _options.HasExplicitRecBatchLines ? _options.RecBatchLines
             : _recGpu ? 16 : _options.RecBatchLines;
+    }
+
+    /// <summary>
+    /// Compile pipelines, upload weights, and run representative detector and
+    /// recognizer shapes so the first document does not pay that cost.
+    /// Discarded outputs do not change later results.
+    /// </summary>
+    public void Warmup()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(PaddleOcrAll));
+        bool detGpu = OnnxSharp.OcrSessionFactory.IsGpuBackend(_options.Detector.Backend);
+        if (!detGpu && !_recGpu) return;
+        long started = Stopwatch.GetTimestamp();
+        try
+        {
+            if (detGpu)
+            {
+                int limit = MathCompat.Clamp(_options.Detector.LimitSideLength, 32, 4096);
+                WarmDetector(limit, limit);
+                WarmDetector(Math.Max(32, limit * 2 / 3), limit);
+                WarmDetector(limit, Math.Max(32, limit * 2 / 3));
+            }
+            if (_recGpu)
+                _recognizer.Warmup(_recBatchEffective);
+        }
+        catch (Exception ex)
+        {
+            OcrVulkan.Warn($"GPU warmup stopped early: {ex.GetType().Name} {ex.Message}");
+        }
+        OcrVulkan.AddInitTicks(Stopwatch.GetTimestamp() - started);
+    }
+
+    private void WarmDetector(int width, int height)
+    {
+        byte[] blank = new byte[checked(width * (long)height * 3)];
+        _detector.Detect(blank, width, height);
     }
 
     private static byte[] ReadDictionary(Stream source)
@@ -188,6 +228,16 @@ public sealed class PaddleOcrAll : IDisposable
             };
         if ((long)sourceWidth * sourceHeight > _options.Detector.MaxImagePixels)
             throw new InvalidOperationException("Source image exceeds MaxImagePixels.");
+
+        // GPU: crop the next same-width batch while the previous one is on
+        // the device, so the queue is not idle for the whole crop. Units and
+        // widths match the all-at-once path; SIMD_OCR_GPU_SYNC=1 keeps that
+        // path for comparison. Classification changes pixels before recognition,
+        // so a classifier stays on the single-batch path.
+        if (_recGpu && _classifier is null
+            && Environment.GetEnvironmentVariable("SIMD_OCR_GPU_SYNC") != "1")
+            return RunGpuPipelined(source, sourceWidth, sourceHeight, sourceStride, format,
+                detection, returnCtcAlignment);
 
         // Per-call crop workspace from the engine's grow-only pool so unique
         // cropTotal sizes are not discarded into LOH after every image.
@@ -377,6 +427,155 @@ public sealed class PaddleOcrAll : IDisposable
     {
         if ((uint)stage < (uint)s_profileTicks.Length)
             Interlocked.Add(ref s_profileTicks[stage], Stopwatch.GetTimestamp() - started);
+    }
+
+    // Same-width units as <see cref="ProcessLinesBatched"/>, but each unit is
+    // recognized while the next unit is still being cropped. Per-line tensors
+    // stay exact-width, so the text matches the all-at-once GPU submission.
+    private unsafe PaddleOcrResult RunGpuPipelined(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, ImagePixelFormat format, PaddleOcrDetectionResult detection, bool returnCtcAlignment)
+    {
+        int count = detection.Boxes.Length;
+        int[] cropOffsets = PooledArrays.Rent<int>(count);
+        int[] cropBytes = PooledArrays.Rent<int>(count);
+        int[] cropWidths = PooledArrays.Rent<int>(count);
+        int[] cropHeights = PooledArrays.Rent<int>(count);
+        int[] recWidths = PooledArrays.Rent<int>(count);
+        byte[] cropBuffer = [];
+        try
+        {
+            long cropTotal = 0;
+            for (int i = 0; i < count; i++)
+            {
+                (int Width, int Height, int ByteCount) size = PPOCRCrop.GetSize(detection.Boxes[i]);
+                if ((long)size.Width * size.Height > _options.MaxCropPixels)
+                    throw new InvalidOperationException("OCR crop exceeds MaxCropPixels.");
+                cropTotal = checked(cropTotal + size.ByteCount);
+                if (cropTotal > int.MaxValue)
+                    throw new InvalidOperationException("OCR crop workspace exceeds the managed array limit.");
+                cropOffsets[i] = checked((int)(cropTotal - size.ByteCount));
+                cropBytes[i] = size.ByteCount;
+                cropWidths[i] = size.Width;
+                cropHeights[i] = size.Height;
+                recWidths[i] = _recognizer.SelectWidthForCrop(size.Width, size.Height);
+            }
+            cropBuffer = RentCropBuffer(checked((int)cropTotal));
+            List<int[]> units = BuildSameWidthUnits(count, recWidths, _recBatchEffective);
+            PaddleOcrRecognitionResult[] recResults = new PaddleOcrRecognitionResult[count];
+            // Pin once: crop workers run on the thread pool while this frame
+            // is still inside the fixed block. The span itself is not captured.
+            fixed (byte* sourcePtr = source)
+            {
+            nint sourceAddress = (nint)sourcePtr;
+            int sourceLength = source.Length;
+            void CropUnit(int[] unit)
+            {
+                int workers = Math.Min(_cropWorkers, unit.Length);
+                if (workers <= 1)
+                {
+                    for (int k = 0; k < unit.Length; k++)
+                        ExtractLine(unit[k]);
+                    return;
+                }
+                Parallel.For(0, workers, worker =>
+                {
+                    for (int k = worker; k < unit.Length; k += workers)
+                        ExtractLine(unit[k]);
+                });
+            }
+            void ExtractLine(int i)
+            {
+                ReadOnlySpan<byte> pixels = new((void*)sourceAddress, sourceLength);
+                PPOCRCrop.ExtractInto(pixels, sourceWidth, sourceHeight, sourceStride,
+                    detection.Boxes[i], cropBuffer.AsSpan(cropOffsets[i], cropBytes[i]),
+                    out cropWidths[i], out cropHeights[i], format);
+            }
+            void RecUnit(int[] unit)
+            {
+                int[][] one = [unit];
+                if (!_recognizer.TryRecognizeUnitsBatched(cropBuffer, cropOffsets, cropBytes, cropWidths, cropHeights,
+                        one, recWidths, recResults, _recIntraOpMax, _cropWorkers, returnCtcAlignment))
+                    RecognizeUnit(unit, _recIntraOpBase, cropBuffer, cropOffsets, cropBytes, cropWidths, cropHeights,
+                        recWidths, recResults, returnCtcAlignment);
+            }
+            if (units.Count == 1)
+            {
+                CropUnit(units[0]);
+                RecUnit(units[0]);
+            }
+            else if (units.Count > 1)
+            {
+                CropUnit(units[0]);
+                for (int i = 1; i < units.Count; i++)
+                {
+                    int[] previous = units[i - 1];
+                    int[] next = units[i];
+                    Exception? error = null;
+                    using ManualResetEventSlim done = new(false);
+                    Thread rec = new(() =>
+                    {
+                        try { RecUnit(previous); }
+                        catch (Exception ex) { error = ex; }
+                        finally { done.Set(); }
+                    })
+                    { IsBackground = true, Name = "ocr-gpu-rec" };
+                    rec.Start();
+                    try { CropUnit(next); }
+                    finally
+                    {
+                        done.Wait();
+                        rec.Join();
+                    }
+                    if (error is not null)
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+                }
+                RecUnit(units[^1]);
+            }
+            PaddleOcrLine[] lines = new PaddleOcrLine[count];
+            for (int i = 0; i < count; i++)
+                lines[i] = MakeLine(detection.Boxes[i], recResults[i], 0, 0, 0);
+            return new PaddleOcrResult
+            {
+                Lines = lines,
+                DetectedCount = count,
+                DetectorResizedWidth = detection.ResizedWidth,
+                DetectorResizedHeight = detection.ResizedHeight,
+            };
+            }
+        }
+        finally
+        {
+            PooledArrays.Return(cropOffsets);
+            PooledArrays.Return(cropBytes);
+            PooledArrays.Return(cropWidths);
+            PooledArrays.Return(cropHeights);
+            PooledArrays.Return(recWidths);
+            if (cropBuffer.Length != 0) ReturnCropBuffer(cropBuffer);
+        }
+    }
+
+    private static List<int[]> BuildSameWidthUnits(int count, int[] recWidths, int maxBatch)
+    {
+        Dictionary<int, List<int>> groups = [];
+        for (int i = 0; i < count; i++)
+        {
+            if (!groups.TryGetValue(recWidths[i], out List<int>? members))
+                groups[recWidths[i]] = members = [];
+            members.Add(i);
+        }
+        List<int[]> units = [];
+        foreach (List<int> members in groups.Values)
+        {
+            int batch = Parallelism.RecognizeBatchSize(members.Count, maxBatch, lineWorkers: 1);
+            for (int offset = 0; offset < members.Count; offset += batch)
+            {
+                int n = Math.Min(batch, members.Count - offset);
+                int[] unit = new int[n];
+                for (int k = 0; k < n; k++) unit[k] = members[offset + k];
+                units.Add(unit);
+            }
+        }
+        return units;
     }
 
     // Width-bucketed batched REC: CLS + rotation first (parallel per line),

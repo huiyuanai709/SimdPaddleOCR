@@ -313,6 +313,9 @@ internal sealed class GpuGraphModel
         _pLn = Pipe("layernorm", 4, 12);
         _pAttn = Pipe("attn", 2, 16);
         _pDotSk = Pipe("mmdot_sk", 8, 28);
+        // Pipelines are in the process-wide cache now; persist it so the next
+        // process does not compile the same shaders again.
+        _dev.SavePipelineCache();
     }
 
     private VkPipeline Pipe(string name, int bindings, int pcBytes, uint reqSg = 0)

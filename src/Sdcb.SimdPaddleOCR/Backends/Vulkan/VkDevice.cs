@@ -2,11 +2,12 @@
 // memory-type selection (ReBAR fast path vs host-visible staging), shader
 // modules from embedded SPIR-V, compute pipelines, descriptor sets, and
 // one-shot command submission.
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace Sdcb.SimdPaddleOCR.Backends.Vulkan;
 
-internal unsafe sealed class VkDevice : IDisposable
+internal unsafe sealed partial class VkDevice : IDisposable
 {
     public IntPtr Instance, PhysDevice, Device, Queue;
     public string DeviceName = "";
@@ -75,6 +76,7 @@ internal unsafe sealed class VkDevice : IDisposable
 
     public static VkDevice Create(string? selector = null)
     {
+        long createStart = Stopwatch.GetTimestamp();
         Vk.RegisterResolver();
         var d = new VkDevice();
 
@@ -207,6 +209,7 @@ internal unsafe sealed class VkDevice : IDisposable
             (byte)'_', (byte)'p', (byte)'u', (byte)'s', (byte)'h', (byte)'_', (byte)'d', (byte)'e', (byte)'s', (byte)'c',
             (byte)'r', (byte)'i', (byte)'p', (byte)'t', (byte)'o', (byte)'r', 0 };
         bool hasPush = false, hasCoop = false, hasSgc = false, hasF16Int8 = false;
+        bool hasFenceWin32 = false, hasFenceFd = false;
         string? prioExt = null;
         for (int i = 0; i < (int)next; i++)
         {
@@ -217,6 +220,8 @@ internal unsafe sealed class VkDevice : IDisposable
             else if (en == "VK_KHR_cooperative_matrix") hasCoop = true;
             else if (en == "VK_EXT_subgroup_size_control") hasSgc = true;
             else if (en == "VK_KHR_shader_float16_int8") hasF16Int8 = true;
+            else if (en == "VK_KHR_external_fence_win32") hasFenceWin32 = true;
+            else if (en == "VK_KHR_external_fence_fd") hasFenceFd = true;
         }
         // SIMD_OCR_VK_NOPUSH=1: exercise the descriptor-pool fallback on devices that have push
         if (Environment.GetEnvironmentVariable("SIMD_OCR_VK_NOPUSH") == "1") hasPush = false;
@@ -291,12 +296,30 @@ internal unsafe sealed class VkDevice : IDisposable
             (byte)'_', (byte)'s', (byte)'h', (byte)'a', (byte)'d', (byte)'e', (byte)'r', (byte)'_', (byte)'f',
             (byte)'l', (byte)'o', (byte)'a', (byte)'t', (byte)'1', (byte)'6', (byte)'_', (byte)'i', (byte)'n',
             (byte)'t', (byte)'8', 0 };
-        byte** extsToEnable = stackalloc byte*[5];
+        uint fenceExport = d.ProbeFenceExport(
+            OperatingSystem.IsWindows() && hasFenceWin32,
+            !OperatingSystem.IsWindows() && hasFenceFd);
+        byte* wantFenceWin32 = stackalloc byte[]
+        {
+            (byte)'V', (byte)'K', (byte)'_', (byte)'K', (byte)'H', (byte)'R', (byte)'_',
+            (byte)'e', (byte)'x', (byte)'t', (byte)'e', (byte)'r', (byte)'n', (byte)'a', (byte)'l', (byte)'_',
+            (byte)'f', (byte)'e', (byte)'n', (byte)'c', (byte)'e', (byte)'_', (byte)'w', (byte)'i', (byte)'n',
+            (byte)'3', (byte)'2', 0,
+        };
+        byte* wantFenceFd = stackalloc byte[]
+        {
+            (byte)'V', (byte)'K', (byte)'_', (byte)'K', (byte)'H', (byte)'R', (byte)'_',
+            (byte)'e', (byte)'x', (byte)'t', (byte)'e', (byte)'r', (byte)'n', (byte)'a', (byte)'l', (byte)'_',
+            (byte)'f', (byte)'e', (byte)'n', (byte)'c', (byte)'e', (byte)'_', (byte)'f', (byte)'d', 0,
+        };
+        byte** extsToEnable = stackalloc byte*[8];
         uint nExt = 0;
         if (hasPush) extsToEnable[nExt++] = wantPush;
         if (d.CoopMatrix) extsToEnable[nExt++] = wantCoop;
         if (hasSgc) extsToEnable[nExt++] = wantSgc;
         if (hasF16Int8 && d.ShaderFloat16) extsToEnable[nExt++] = wantF16;
+        if (fenceExport == VkConst.ExternalFenceOpaqueWin32) extsToEnable[nExt++] = wantFenceWin32;
+        else if (fenceExport == VkConst.ExternalFenceSyncFd) extsToEnable[nExt++] = wantFenceFd;
         Vk.VkDeviceCreateInfo dci = new()
         {
             SType = VkConst.StDeviceCreateInfo,
@@ -394,6 +417,8 @@ internal unsafe sealed class VkDevice : IDisposable
                 d._pushDesc = (delegate* unmanaged[Cdecl]<IntPtr, uint, IntPtr, uint, uint, Vk.VkWriteDescriptorSet*, void>)fn;
             }
         }
+        if (fenceExport != 0)
+            d.EnableFenceExport(fenceExport);
 
         fixed (Vk.VkPhysicalDeviceMemoryProperties* mp = &d.MemProps)
             Vk.vkGetPhysicalDeviceMemoryProperties(d.PhysDevice, mp);
@@ -418,6 +443,12 @@ internal unsafe sealed class VkDevice : IDisposable
         d.DeviceLocalBytes = local;
         d.BufferCapBytes = OcrVulkan.BufferByteCap(local);
         d.DeviceKind = KindOf(props.DeviceType);
+        byte[] uuid = new byte[16];
+        byte* src = props.PipelineCacheUUID;
+        for (int i = 0; i < 16; i++) uuid[i] = src[i];
+        d.OpenPipelineCache(props.VendorID, props.DeviceID, props.DriverVersion, uuid);
+        OcrVulkan.AddInitTicks(Stopwatch.GetTimestamp() - createStart);
+        OcrVulkan.NoteDevice(d.DeviceName, d.FenceWaitMode);
         for (int i = 0; i < listed.Length; i++)
         {
             ulong heapBytes = i == chosen ? local : 0;
@@ -617,7 +648,7 @@ internal unsafe sealed class VkDevice : IDisposable
             Layout = layout,
         };
         IntPtr pipeline;
-        Vk.Check(Vk.vkCreateComputePipelines(Device, IntPtr.Zero, 1, &cpci, null, &pipeline), "vkCreateComputePipelines");
+        Vk.Check(Vk.vkCreateComputePipelines(Device, PipelineCache, 1, &cpci, null, &pipeline), "vkCreateComputePipelines");
         return new VkPipeline { Pipeline = pipeline, Layout = layout, SetLayout = setLayout, PushLayout = pushLayout };
     }
 
@@ -823,7 +854,17 @@ internal unsafe sealed class VkDevice : IDisposable
 
     public IntPtr NewFence(bool signaled = false)
     {
-        Vk.VkFenceCreateInfo ci = new() { SType = VkConst.StFenceCreateInfo, Flags = signaled ? 1u : 0u };
+        Vk.VkExportFenceCreateInfo export = new()
+        {
+            SType = VkConst.StExportFenceCreateInfo,
+            HandleTypes = _fenceExport,
+        };
+        Vk.VkFenceCreateInfo ci = new()
+        {
+            SType = VkConst.StFenceCreateInfo,
+            Flags = signaled ? 1u : 0u,
+            PNext = _fenceExport != 0 ? &export : null,
+        };
         Vk.Check(Vk.vkCreateFence(Device, &ci, null, out IntPtr f), "vkCreateFence");
         return f;
     }
@@ -835,8 +876,10 @@ internal unsafe sealed class VkDevice : IDisposable
             SType = VkConst.StSubmitInfo,
             CommandBufferCount = 1, PCommandBuffers = &cmd,
         };
+        long submitStart = Stopwatch.GetTimestamp();
         VkResult r;
         lock (QueueLock) r = Vk.vkQueueSubmit(Queue, 1, &si, fence);
+        OcrVulkan.AddSubmitTicks(Stopwatch.GetTimestamp() - submitStart);
         Vk.Check(r, "vkQueueSubmit");
     }
 
@@ -847,14 +890,25 @@ internal unsafe sealed class VkDevice : IDisposable
 
     public void WaitFence(IntPtr fence)
     {
-        Vk.Check(Vk.vkWaitForFences(Device, 1, &fence, 1, ulong.MaxValue), "vkWaitForFences");
+        long waitStart = Stopwatch.GetTimestamp();
+        // Exported Win32 / sync-fd waits block in the kernel. vkWaitForFences
+        // is the fallback; some drivers busy-spin for the whole timeout.
+        if (!WaitExported(fence))
+            Vk.Check(Vk.vkWaitForFences(Device, 1, &fence, 1, ulong.MaxValue), "vkWaitForFences");
+        OcrVulkan.AddWaitTicks(Stopwatch.GetTimestamp() - waitStart);
         // auto-reset: a fence must be unsignaled before reuse in vkQueueSubmit
         Vk.Check(Vk.vkResetFences(Device, 1, &fence), "vkResetFences");
     }
 
     public void Dispose()
     {
-        if (Device != IntPtr.Zero) { Vk.vkDeviceWaitIdle(Device); Vk.vkDestroyDevice(Device, null); Device = IntPtr.Zero; }
+        if (Device != IntPtr.Zero)
+        {
+            Vk.vkDeviceWaitIdle(Device);
+            DestroyPipelineCache();
+            Vk.vkDestroyDevice(Device, null);
+            Device = IntPtr.Zero;
+        }
         if (Instance != IntPtr.Zero) { Vk.vkDestroyInstance(Instance, null); Instance = IntPtr.Zero; }
     }
 }
