@@ -1,0 +1,38 @@
+name: restore-gpugraph
+
+on:
+  push:
+    branches: [cursor/vulkan-device-lost-08b9]
+    paths:
+      - .github/workflows/restore-gpugraph.yml
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cursor/vulkan-device-lost-08b9
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble GpuGraph and drop the chunks
+        run: |
+          set -euo pipefail
+          out=src/Sdcb.SimdPaddleOCR/Backends/Vulkan/GpuGraph.cs
+          cat _restore/00.cs _restore/01.cs _restore/02.cs _restore/03.cs _restore/04.cs \
+              _restore/05.cs _restore/06.cs _restore/07.cs _restore/08.cs _restore/09.cs \
+              _restore/10.cs _restore/11.cs _restore/12.cs _restore/13.cs _restore/14.cs \
+              _restore/15.cs _restore/16.cs _restore/17.cs _restore/18.cs _restore/19.cs \
+              _restore/20.cs > "$out"
+          sha=$(git hash-object "$out")
+          echo "sha=$sha size=$(wc -c < "$out")"
+          test "$sha" = "d2691e65daa77c593d1711a3dd6196b092189f7f"
+          git rm -r _restore
+          git rm .github/workflows/restore-gpugraph.yml
+          git config user.name "huiyuanai709"
+          git config user.email "huiyuanai709@gmail.com"
+          git add "$out"
+          git commit -m "Align fused-SE ticket descriptors and surface BuildPlan errors."
+          git push origin HEAD:cursor/vulkan-device-lost-08b9
