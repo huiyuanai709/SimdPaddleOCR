@@ -111,6 +111,18 @@ public class VulkanBudgetTests
             OcrVulkan.PipelineCacheDirectory = property;
         }
     }
+
+    [Fact]
+    public void SmallDeviceKeepsRecognitionBatchAtEight()
+    {
+        const ulong twoGb = 2UL << 30;
+        const ulong eightGb = 8UL << 30;
+        Assert.Equal(8, OcrVulkan.LimitRecBatch(32, twoGb, coopGemm: false));
+        Assert.Equal(8, OcrVulkan.LimitRecBatch(32, twoGb, coopGemm: true));
+        Assert.Equal(8, OcrVulkan.LimitRecBatch(32, eightGb, coopGemm: false));
+        Assert.Equal(32, OcrVulkan.LimitRecBatch(32, eightGb, coopGemm: true));
+        Assert.Equal(4, OcrVulkan.LimitRecBatch(4, twoGb, coopGemm: false));
+    }
 }
 
 #if !USE_NS20_LIBRARY
