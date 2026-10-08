@@ -44,6 +44,23 @@ internal unsafe sealed partial class VkDevice : IDisposable
     /// <summary>The MMA shape of the cm shader set this device selects is advertised:
     /// sg32 uses 16x16x16, sg16 (<c>conv1x1_cm</c>) uses 8x16x16.</summary>
     public bool CoopGemm => CoopMatrix && (Sg32Subgroup ? Coop16x16x16 : Coop8x16x16);
+    /// <summary>
+    /// Dispatches per <c>vkQueueSubmit</c> on a small device. Windows TDR
+    /// resets the GPU when one submission runs longer than about two seconds.
+    /// 0 keeps the whole graph in one submission (discrete cards with MMA).
+    /// <c>SIMD_OCR_GPU_CHUNK</c> overrides; <c>0</c> disables the split.
+    /// </summary>
+    public int DispatchBudget
+    {
+        get
+        {
+            string? over = Environment.GetEnvironmentVariable("SIMD_OCR_GPU_CHUNK");
+            if (int.TryParse(over, out int n))
+                return n < 0 ? 0 : n > 10_000 ? 10_000 : n;
+            bool limited = (DeviceLocalBytes > 0 && DeviceLocalBytes < 4UL << 30) || !CoopGemm;
+            return limited ? 16 : 0;
+        }
+    }
     public uint QueuePriority;          // VkQueueGlobalPriority granted (0 = driver default)
     private unsafe delegate* unmanaged[Cdecl]<IntPtr, uint, IntPtr, uint, uint, Vk.VkWriteDescriptorSet*, void> _pushDesc;
     public double TimestampPeriodNs = 1;
@@ -284,6 +301,10 @@ internal unsafe sealed partial class VkDevice : IDisposable
         coopEn.PNext = hasSgc ? &sgcEn : null;
         Vk.VkPhysicalDeviceFeatures feats = new();
         if (d.Storage16Bit) feats.ShaderInt16 = 1;
+        // Diagnostic only. Production leaves this off: robust loads hide
+        // out-of-range shader reads by returning zeros, which would change OCR.
+        if (Environment.GetEnvironmentVariable("SIMD_OCR_VK_ROBUST") == "1")
+            feats.F[0] = 1;
         byte* wantCoop = stackalloc byte[] { (byte)'V', (byte)'K', (byte)'_', (byte)'K', (byte)'H', (byte)'R',
             (byte)'_', (byte)'c', (byte)'o', (byte)'o', (byte)'p', (byte)'e', (byte)'r', (byte)'a', (byte)'t',
             (byte)'i', (byte)'v', (byte)'e', (byte)'_', (byte)'m', (byte)'a', (byte)'t', (byte)'r', (byte)'i',
@@ -449,6 +470,7 @@ internal unsafe sealed partial class VkDevice : IDisposable
         d.OpenPipelineCache(props.VendorID, props.DeviceID, props.DriverVersion, uuid);
         OcrVulkan.AddInitTicks(Stopwatch.GetTimestamp() - createStart);
         OcrVulkan.NoteDevice(d.DeviceName, d.FenceWaitMode);
+        OcrVulkan.NoteCoopGemm(d.CoopGemm);
         for (int i = 0; i < listed.Length; i++)
         {
             ulong heapBytes = i == chosen ? local : 0;
@@ -893,7 +915,17 @@ internal unsafe sealed partial class VkDevice : IDisposable
         long waitStart = Stopwatch.GetTimestamp();
         // Exported Win32 / sync-fd waits block in the kernel. vkWaitForFences
         // is the fallback; some drivers busy-spin for the whole timeout.
-        if (!WaitExported(fence))
+        // A Win32 wait does not surface VK_ERROR_DEVICE_LOST (the event can
+        // still be signaled), so confirm with vkGetFenceStatus before reuse.
+        if (WaitExported(fence))
+        {
+            VkResult status = Vk.vkGetFenceStatus(Device, fence);
+            if (status == VkResult.ErrorDeviceLost)
+                throw new InvalidOperationException("Vulkan vkGetFenceStatus failed: ErrorDeviceLost");
+            if (status != VkResult.Success)
+                Vk.Check(Vk.vkWaitForFences(Device, 1, &fence, 1, ulong.MaxValue), "vkWaitForFences");
+        }
+        else
             Vk.Check(Vk.vkWaitForFences(Device, 1, &fence, 1, ulong.MaxValue), "vkWaitForFences");
         OcrVulkan.AddWaitTicks(Stopwatch.GetTimestamp() - waitStart);
         // auto-reset: a fence must be unsignaled before reuse in vkQueueSubmit
