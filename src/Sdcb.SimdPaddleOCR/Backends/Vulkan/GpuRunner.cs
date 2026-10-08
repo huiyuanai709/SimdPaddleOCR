@@ -221,55 +221,116 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
         // reused across runs: the caller consumes it before this session runs again
         if (_result.Length < outElems) _result = new float[RoundUpPow2(outElems)];
         float[] result = _result;
-        int submitted = 0, drained = 0;
+        int inFlight = -1;
         long t2 = 0, t3;
+        // Small devices split one graph across several submissions. A fence
+        // wait between chunks is the memory dependency: pipeline barriers do
+        // not reach the previous command buffer, and Windows TDR times each
+        // submission on its own. Profiling keeps a single command buffer.
+        int budget = s_prof ? 0 : _dev.DispatchBudget;
+        bool acceptSink = true;
         try
         {
             for (int w = 0; w < waves; w++)
             {
                 IntPtr cmd = _cmds[w];
+                IntPtr fence = _fences[w];
                 BeginRecord(cmd);
+                bool recording = true;
                 int s0 = waveStart[w], s1 = waveStart[w + 1];
+                VkPipeline? bound = null;
+                int chunk = 0;
+                void CloseChunk(bool reopen)
+                {
+                    if (chunk == 0)
+                    {
+                        // A chunk boundary can reopen a buffer that then gets
+                        // no dispatches. End it so the next reset is legal.
+                        if (!reopen && recording)
+                        {
+                            Vk.Check(Vk.vkEndCommandBuffer(cmd), "end");
+                            recording = false;
+                        }
+                        return;
+                    }
+                    Vk.Check(Vk.vkEndCommandBuffer(cmd), "end");
+                    recording = false;
+                    cpuPre += Stopwatch.GetTimestamp() - phase;
+                    _dev.Submit(cmd, fence);
+                    inFlight = w;
+                    phase = Stopwatch.GetTimestamp();
+                    chunk = 0;
+                    bound = null;
+                    try { _dev.WaitFence(fence); }
+                    finally { inFlight = -1; }
+                    phase = Stopwatch.GetTimestamp();
+                    if (reopen)
+                    {
+                        BeginRecord(cmd);
+                        recording = true;
+                        // Submission order is only an execution dependency.
+                        // Shader writes from the chunk that just retired stay
+                        // invisible to the next command buffer until a barrier
+                        // makes them available. Pipeline barriers do not cross
+                        // command-buffer boundaries on their own.
+                        _dev.CmdComputeBarrier(cmd);
+                    }
+                }
+                void CountDispatch()
+                {
+                    chunk++;
+                    if (budget > 0 && chunk >= budget)
+                        CloseChunk(reopen: true);
+                }
                 if (interleave)
                 {
-                    VkPipeline? bound = null;
                     int levels = 0;
                     for (int i = s0; i < s1; i++) levels = Math.Max(levels, sched[i].Recs.Length);
                     for (int k = 0; k < levels; k++)
                     {
                         for (int i = s0; i < s1; i++)
-                            if (k < sched[i].Recs.Length)
-                                RecordOne(cmd, sched[i].Recs[k], ref bound, (ulong)inBase[i] * 4,
-                                    (ulong)outBase[i] * 4, (ulong)arenaBase[i] * 2,
-                                    (ulong)(i - s0) * GpuGraphModel.PartBytes);
-                        _dev.CmdComputeBarrier(cmd);
+                        {
+                            if (k >= sched[i].Recs.Length) continue;
+                            RecordOne(cmd, sched[i].Recs[k], ref bound, (ulong)inBase[i] * 4,
+                                (ulong)outBase[i] * 4, (ulong)arenaBase[i] * 2,
+                                (ulong)(i - s0) * GpuGraphModel.PartBytes);
+                            CountDispatch();
+                        }
+                        if (chunk > 0) _dev.CmdComputeBarrier(cmd);
                     }
                 }
                 else
+                {
+                    bool prof = s_prof && n == 1;
+                    bool barriers = !s_noBar;
                     for (int i = s0; i < s1; i++)
-                        RecordRecs(cmd, Selected(sched[i]), s_prof && n == 1, !s_noBar,
+                    {
+                        IReadOnlyList<GpuRec> recs = Selected(sched[i]);
+                        if (prof) RecordRecs(cmd, recs, true, barriers,
                             (ulong)inBase[i] * 4, (ulong)outBase[i] * 4);
-                Vk.Check(Vk.vkEndCommandBuffer(cmd), "end");
-                cpuPre += Stopwatch.GetTimestamp() - phase;
-                _dev.Submit(cmd, _fences[w]);
+                        else
+                        {
+                            foreach (GpuRec r in recs)
+                            {
+                                RecordOne(cmd, r, ref bound, (ulong)inBase[i] * 4, (ulong)outBase[i] * 4, 0, 0);
+                                if (barriers) _dev.CmdComputeBarrier(cmd);
+                                CountDispatch();
+                            }
+                        }
+                    }
+                    if (prof) chunk = 1; // one buffer, closed below
+                }
+                CloseChunk(reopen: false);
                 phase = Stopwatch.GetTimestamp();
-                submitted++;
-            }
-            t2 = Stopwatch.GetTimestamp();
-            bool more = true;
-            for (int w = 0; w < waves; w++)
-            {
-                _dev.WaitFence(_fences[w]);
-                drained++;
-                phase = Stopwatch.GetTimestamp();
-                int s0 = waveStart[w], s1 = waveStart[w + 1];
                 ulong lo = (ulong)outBase[s0] * 4;
                 _out!.Invalidate(lo, (ulong)Align64(outBase[s1 - 1] + sched[s1 - 1].OutElems) * 4 - lo);
                 for (int i = s0; i < s1; i++)
                     new ReadOnlySpan<float>(_outMap + outBase[i], sched[i].OutElems)
                         .CopyTo(result.AsSpan(outOffsets[i]));
                 long tsk = s_dbgTime ? Stopwatch.GetTimestamp() : 0;
-                if (sink is not null && more) more = sink(result, outOffsets, s0, s1 - s0);
+                t2 = Stopwatch.GetTimestamp();
+                if (sink is not null && acceptSink)
+                    acceptSink = sink(result, outOffsets, s0, s1 - s0);
                 if (s_dbgTime) _dbgSink += Stopwatch.GetTimestamp() - tsk;
                 cpuPost += Stopwatch.GetTimestamp() - phase;
                 phase = Stopwatch.GetTimestamp();
@@ -278,8 +339,8 @@ internal sealed unsafe class GpuDetGraph : IOcrGraphRunner
         finally
         {
             // never leave a submission in flight over buffers the next run reuses
-            for (int w = drained; w < submitted; w++)
-                try { _dev.WaitFence(_fences[w]); } catch (InvalidOperationException) { }
+            if (inFlight >= 0)
+                try { _dev.WaitFence(_fences[inFlight]); } catch (InvalidOperationException) { }
             OcrVulkan.AddCpuTicks(cpuPre, cpuPost);
             cpuPre = 0;
             cpuPost = 0;
