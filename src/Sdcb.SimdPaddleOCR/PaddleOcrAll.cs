@@ -172,7 +172,7 @@ public sealed class PaddleOcrAll : IDisposable
                 WarmDetector(Math.Max(32, limit * 2 / 3), limit);
                 WarmDetector(limit, Math.Max(32, limit * 2 / 3));
             }
-            if (_recGpu)
+            if (_recGpu && !OcrVulkan.GpuDisabled)
                 _recognizer.Warmup(_recBatchEffective);
         }
         catch (Exception ex)
@@ -184,6 +184,8 @@ public sealed class PaddleOcrAll : IDisposable
 
     private void WarmDetector(int width, int height)
     {
+        if (OcrVulkan.GpuDisabled) return;
+        if (width < 32 || height < 32) return;
         byte[] blank = new byte[checked(width * (long)height * 3)];
         _detector.Detect(blank, width, height);
     }

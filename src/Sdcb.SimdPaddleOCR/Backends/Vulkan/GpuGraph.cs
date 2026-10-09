@@ -815,7 +815,11 @@ internal sealed class GpuGraphModel
         // directly to the HardSigmoid output slot.
         var seEmit = new Dictionary<int, (int fc1, int fc2, int hs)>();
         var concatAbsorbed = new HashSet<int>();   // phys tensors written directly into a concat slice
-        int seCtr = 0;   // fused-SE ticket slot index (counters live at partBuf+32KB, away from partials)
+        // Fused-SE ticket index, in uints, within the part-buffer tail that
+        // starts at PartCtrElem. Each block's descriptor offset must be a
+        // multiple of minStorageBufferOffsetAlignment (16 on lavapipe and
+        // NVIDIA, 256 on some devices). A 4-uint stride faults those GPUs.
+        int seCtr = 0;
         if (Environment.GetEnvironmentVariable("SIMD_OCR_NOSE") == null)
         {
             bool IsPwConv(int ni)
@@ -1755,6 +1759,13 @@ internal sealed class GpuGraphModel
                         int s = PartSplits(hw, c);
                         int pp = (hw + s - 1) / s;
                         VkBuffer pb2 = PartBuf(s * c * nb + 4 * nb);
+                        // 64 uints = 256 bytes. ctr[batch] stays packed inside
+                        // the slot; the next block starts on the next slot.
+                        const int seAlign = 64;
+                        int seStride = (nb + seAlign - 1) & ~(seAlign - 1);
+                        if (seCtr + seStride > (64 * 1024) / 4)
+                            throw new NotSupportedException(
+                                $"SE ticket region exhausted at node {ni} (batch {nb})");
                         Emit(_pSeF, $"se_f n{ni} c{c} s{s} r{rDim}",
                             [(arena, SlotOf(node.Inputs[0]), 2), (pb2, 0, 2),
                              (pb2, PartCtrElem + (long)seCtr, 4),
@@ -1768,7 +1779,7 @@ internal sealed class GpuGraphModel
                              BitConverter.SingleToUInt32Bits(F32(hpp, 4)),
                              BitConverter.SingleToUInt32Bits(F32(hpp, 8))],
                             (uint)s, (uint)nb);
-                        seCtr += nb;   // one ticket counter per batch
+                        seCtr += seStride;
                         break;
                     }
                     // lite and wide no-coopmat parts take it at any size:
@@ -2237,7 +2248,8 @@ internal sealed class GpuGraphModel
             {
                 throw new NotSupportedException(
                     $"BuildPlan failed at node {ni} op={node.Operator} " +
-                    $"in=[{string.Join(',', node.Inputs)}] out=[{string.Join(',', node.Outputs)}]", ex);
+                    $"in=[{string.Join(',', node.Inputs)}] out=[{string.Join(',', node.Outputs)}]: " +
+                    $"{ex.GetType().Name}: {ex.Message}", ex);
             }
         }
 

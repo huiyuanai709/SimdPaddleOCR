@@ -80,7 +80,7 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
     public ReadOnlySpan<float> RunInternal(ReadOnlySpan<float> input)
     {
         if (_disposed) throw new ObjectDisposedException(GetType().Name);
-        if (_gpuDead)
+        if (MarkDeadIfDisabled())
         {
             OcrVulkan.AddFallback();
             return Cpu().RunInternal(CpuInput(input));
@@ -102,7 +102,7 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
     {
         operands = default;
         if (_disposed) throw new ObjectDisposedException(GetType().Name);
-        if (_gpuDead)
+        if (MarkDeadIfDisabled())
         {
             OcrVulkan.AddFallback();
             return Cpu().TryRunUntilCtcProjection(CpuInput(input), out operands);
@@ -132,7 +132,7 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
     private int[][] _many = [];
     private int _manyVolume;
 
-    public bool CanRunMany => !_gpuDead && !_disposed;
+    public bool CanRunMany => !_gpuDead && !_disposed && !OcrVulkan.GpuDisabled;
 
     public Span<float> ReshapeMany(IReadOnlyList<int[]> shapes)
     {
@@ -175,7 +175,7 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
 
     public bool TryRunManyUntilCtcProjection(CtcUnitsReady onReady)
     {
-        if (_gpuDead)
+        if (MarkDeadIfDisabled())
         {
             OcrVulkan.AddFallback();
             return false;
@@ -213,8 +213,23 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
         return ok;
     }
 
+    private bool MarkDeadIfDisabled()
+    {
+        if (_gpuDead) return true;
+        if (!OcrVulkan.GpuDisabled) return false;
+        _gpuDead = true;
+        return true;
+    }
+
     private bool NoteGpuFailure(Exception ex, string where)
     {
+        if (OcrVulkan.IsDeviceLost(ex))
+        {
+            OcrVulkan.NoteDeviceLost($"{where}: {ex.Message}");
+            _gpuDead = true;
+            OcrVulkan.AddFallback();
+            return true;
+        }
         if (IsDeviceOom(ex))
         {
             if (!_oomLatched)
@@ -226,7 +241,10 @@ internal abstract class GpuSessionBase : IOcrSession, IBatchedCtcSession
             OcrVulkan.AddFallback();
             return true;
         }
-        Console.Error.WriteLine($"[{_logTag}] {where} fallback: {ex.GetType().Name} {ex.Message}");
+        string inner = ex.InnerException is null
+            ? ""
+            : $" | {ex.InnerException.GetType().Name}: {ex.InnerException.Message}";
+        Console.Error.WriteLine($"[{_logTag}] {where} fallback: {ex.GetType().Name} {ex.Message}{inner}");
         _gpuDead = true;
         OcrVulkan.AddFallback();
         return true;

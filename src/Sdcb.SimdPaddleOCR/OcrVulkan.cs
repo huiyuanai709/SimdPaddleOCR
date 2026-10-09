@@ -197,6 +197,9 @@ public static class OcrVulkan
     private static string s_fenceWait = "none";
     private static string s_cachePath = "";
     private static int s_cacheRestored;
+    private static int s_coopGemm;
+    private static int s_deviceLost;
+    private static int s_gpuDisabled;
 
     public static string DeviceName => s_deviceName;
     public static string FenceWait => s_fenceWait;
@@ -205,6 +208,26 @@ public static class OcrVulkan
     public static long GpuRuns => Interlocked.Read(ref s_gpuRuns);
     public static long CpuFallbackRuns => Interlocked.Read(ref s_fallbackRuns);
     public static double InitMs => TicksToMs(Interlocked.Read(ref s_initTicks));
+    /// <summary>Device advertises a cooperative-matrix GEMM the graph can use.</summary>
+    public static bool CoopGemm => s_coopGemm != 0;
+    /// <summary>VK_ERROR_DEVICE_LOST seen in this process. Later GPU sessions stay on CPU.</summary>
+    public static int DeviceLostCount => Volatile.Read(ref s_deviceLost);
+    /// <summary>Set after the first device-lost. Every session then serves from CPU.</summary>
+    public static bool GpuDisabled => Volatile.Read(ref s_gpuDisabled) != 0;
+
+    /// <summary>
+    /// Recognition lines per submit on a small GPU. Under 4 GB, or without
+    /// cooperative-matrix GEMM, keep the batch at 8 so one submission stays
+    /// inside the Windows TDR window. Larger heaps with MMA keep
+    /// <paramref name="requested"/>.
+    /// </summary>
+    public static int LimitRecBatch(int requested, ulong deviceLocalBytes, bool coopGemm)
+    {
+        if (requested < 1) requested = 1;
+        if (requested > 64) requested = 64;
+        bool limited = (deviceLocalBytes > 0 && deviceLocalBytes < FourGiB) || !coopGemm;
+        return limited ? Math.Min(requested, 8) : requested;
+    }
 
     public readonly record struct GpuTimingSnapshot(
         double GpuSubmitMs,
@@ -306,6 +329,25 @@ public static class OcrVulkan
     {
         if (!string.IsNullOrEmpty(name)) s_deviceName = name;
         if (!string.IsNullOrEmpty(fenceWait)) s_fenceWait = fenceWait;
+    }
+
+    internal static void NoteCoopGemm(bool coop) => s_coopGemm = coop ? 1 : 0;
+
+    internal static bool IsDeviceLost(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+            if (e.Message.Contains("ErrorDeviceLost", StringComparison.Ordinal))
+                return true;
+        return false;
+    }
+
+    /// <summary>First call logs once and pins every later session to CPU.</summary>
+    internal static void NoteDeviceLost(string where)
+    {
+        int n = Interlocked.Increment(ref s_deviceLost);
+        Volatile.Write(ref s_gpuDisabled, 1);
+        if (n == 1)
+            Warn($"Vulkan device lost ({where}); OCR stays on CPU for the rest of this process");
     }
 
     internal static void NotePipelineCache(string path, bool restored)

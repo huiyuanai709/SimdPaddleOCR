@@ -691,8 +691,10 @@ public sealed class PaddleOcrRecognizer : IDisposable
         int[] batches = batch == 1 ? [1] : [1, batch];
         foreach (int n in batches)
         {
+            if (n < 1 || OcrVulkan.GpuDisabled) break;
             foreach (int w in widths)
             {
+                if (w < 32 || OcrVulkan.GpuDisabled) break;
                 int volume = checked(n * 3 * 48 * w);
                 IOcrSession session = RentSessionForVolume(volume);
                 session.PlanForCtcProjection = true;
