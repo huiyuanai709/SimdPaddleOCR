@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SimdPaddleOCR WebAssembly Benchmark</title>
+    <style>
+        :root {
+            --bg: #121417;
+            --panel: #1b1e24;
+            --border: #2a303c;
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --success: #10b981;
+            --text: #f3f4f6;
+            --text-dim: #9ca3af;
+            --mono: 'JetBrains Mono', 'Fira Code', Consolas, Menlo, monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            padding: 24px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 { font-size: 1.5rem; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+        .badge {
+            font-size: 0.75rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: #2563eb26;
+            color: #60a5fa;
+            border: 1px solid #3b82f640;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .card h3 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-dim);
+            margin-bottom: 12px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+        .stat-val { font-family: var(--mono); font-weight: 500; color: #fff; }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            margin-top: 8px;
+        }
+
+        label { font-size: 0.85rem; color: var(--text-dim); display: flex; flex-direction: column; gap: 4px; }
+        input, select {
+            background: #111317;
+            border: 1px solid var(--border);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 0.9rem;
+        }
+
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-top: 18px;
+        }
+        button:hover { background: var(--primary-hover); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .progress-box { margin-bottom: 20px; }
+        .progress-bar-bg {
+            background: #222730;
+            border-radius: 6px;
+            height: 10px;
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+        .progress-fill {
+            background: var(--primary);
+            height: 100%;
+            width: 0%;
+            transition: width 0.15s ease;
+        }
+
+        pre {
+            background: #0d0f12;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 14px;
+            font-family: var(--mono);
+            font-size: 0.82rem;
+            line-height: 1.45;
+            height: 320px;
+            overflow-y: auto;
+            color: #d1d5db;
+        }
+
+        .log-entry { margin: 2px 0; }
+        .log-dim { color: #6b7280; }
+        .log-success { color: var(--success); font-weight: 500; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>SimdPaddleOCR WebAssembly <span class="badge">net10.0 Wasm</span></h1>
+        <div id="env-badge" class="badge">Detecting environment...</div>
+    </header>
+
+    <div class="grid">
+        <div class="card">
+            <h3>Environment Diagnostics</h3>
+            <div class="stat-row">
+                <span>crossOriginIsolated (COOP/COEP):</span>
+                <span id="stat-coop" class="stat-val">-</span>
+            </div>
+            <div class="stat-row">
+                <span>hardwareConcurrency (Workers):</span>
+                <span id="stat-threads" class="stat-val">-</span>
+            </div>
+            <div class="stat-row">
+                <span>SIMD 128-bit:</span>
+                <span id="stat-simd" class="stat-val">Supported</span>
+            </div>
+            <div class="stat-row">
+                <span>Runtime Status:</span>
+                <span id="stat-status" class="stat-val">Ready</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Benchmark Options</h3>
+            <div class="controls">
+                <label>
+                    Model:
+                    <select id="opt-model">
+                        <option value="tiny" selected>ChineseV6Tiny (tiny)</option>
+                        <option value="small">ChineseV6Small (small)</option>
+                        <option value="medium">ChineseV6Medium (medium)</option>
+                    </select>
+                </label>
+                <label>
+                    Workers:
+                    <select id="opt-workers">
+                        <option value="1">1 worker (single-thread)</option>
+                        <option value="2">2 workers</option>
+                        <option value="4" selected>4 workers (tiny-4w)</option>
+                        <option value="8">8 workers</option>
+                    </select>
+                </label>
+                <label>
+                    Image Count:
+                    <input id="opt-count" type="number" value="100" min="0" max="100" style="width: 80px;" />
+                </label>
+                <button id="btn-start" onclick="startBenchmark()">Run Benchmark</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="progress-box">
+        <div class="progress-bar-bg">
+            <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-dim);">
+            <span id="progress-text">Ready</span>
+            <span id="progress-pct">0%</span>
+        </div>
+    </div>
+
+    <pre id="log-window"></pre>
+
+    <script type="module">
+        import { dotnet } from './_framework/dotnet.js';
+
+        const statCoop = document.getElementById('stat-coop');
+        const statThreads = document.getElementById('stat-threads');
+        const statStatus = document.getElementById('stat-status');
+        const envBadge = document.getElementById('env-badge');
+        const logWindow = document.getElementById('log-window');
+        const progressFill = document.getElementById('progress-fill');
+        const progressText = document.getElementById('progress-text');
+        const progressPct = document.getElementById('progress-pct');
+        const btnStart = document.getElementById('btn-start');
+
+        const params = new URLSearchParams(window.location.search);
+        const autoRun = params.has('workers') || params.has('autorun');
+
+        if (params.has('workers')) document.getElementById('opt-workers').value = params.get('workers');
+        if (params.has('model')) document.getElementById('opt-model').value = params.get('model');
+        if (params.has('count')) document.getElementById('opt-count').value = params.get('count');
+
+        const isIsolated = window.crossOriginIsolated;
+        statCoop.textContent = isIsolated ? "true (SharedArrayBuffer Active)" : "false (COOP/COEP Missing)";
+        statCoop.style.color = isIsolated ? "#10b981" : "#ef4444";
+        statThreads.textContent = navigator.hardwareConcurrency + " cores";
+        envBadge.textContent = isIsolated ? `Multi-threaded (${navigator.hardwareConcurrency}T)` : "Single-threaded";
+
+        export function log(msg, cls = "") {
+            const line = document.createElement('div');
+            line.className = 'log-entry ' + cls;
+            line.textContent = msg;
+            logWindow.appendChild(line);
+            logWindow.scrollTop = logWindow.scrollHeight;
+
+            if (msg.includes("[WASM][") && msg.includes("/")) {
+                try {
+                    const match = msg.match(/\[WASM\]\[(\d+)\/(\d+)\]/);
+                    if (match) {
+                        const cur = parseInt(match[1]);
+                        const total = parseInt(match[2]);
+                        const pct = Math.round((cur / total) * 100);
+                        progressFill.style.width = pct + "%";
+                        progressPct.textContent = pct + "%";
+                        progressText.textContent = `Processing image ${cur} of ${total}...`;
+                    }
+                } catch {}
+            }
+        }
+
+        window.addEventListener('error', (e) => {
+            const errStr = "[WINDOW ERROR] " + (e.error ? (e.error.stack || e.error.message) : e.message);
+            log(errStr);
+            try { fetch('/api/log', { method: 'POST', body: errStr }).catch(() => {}); } catch {}
+        });
+        window.addEventListener('unhandledrejection', (e) => {
+            const errStr = "[UNHANDLED REJECTION] " + (e.reason ? (e.reason.stack || e.reason.message || e.reason) : e);
+            log(errStr);
+            try { fetch('/api/log', { method: 'POST', body: errStr }).catch(() => {}); } catch {}
+        });
+
+        const origLog = console.log;
+        console.log = function(...args) {
+            origLog.apply(console, args);
+            let str = '';
+            if (args.length === 1 && typeof args[0] === 'string') {
+                try {
+                    const parsed = JSON.parse(args[0]);
+                    if (parsed && parsed.payload !== undefined) str = parsed.payload;
+                    else str = args[0];
+                } catch {
+                    str = args[0];
+                }
+            } else {
+                str = args.map(a => {
+                    if (a instanceof Error) return a.stack || a.message || String(a);
+                    if (typeof a === 'object' && a !== null) {
+                        if (a.payload) return a.payload;
+                        if (a.message) return a.message + (a.stack ? '\n' + a.stack : '');
+                        return JSON.stringify(a);
+                    }
+                    return String(a);
+                }).join(' ');
+            }
+            if (str && !str.includes("Failed to patch opcode")) {
+                log(str);
+                try {
+                    fetch('/api/log', { method: 'POST', body: str }).catch(() => {});
+                } catch {}
+            }
+        };
+
+        window.startBenchmark = async function() {
+            btnStart.disabled = true;
+            statStatus.textContent = "Running...";
+            progressFill.style.width = "0%";
+            progressPct.textContent = "0%";
+            logWindow.innerHTML = "";
+
+            const workers = document.getElementById('opt-workers').value;
+            const model = document.getElementById('opt-model').value;
+            const count = document.getElementById('opt-count').value;
+            const out = params.get('out') || `bench-out/wasm-${model}-${workers}w.json`;
+
+            const cliArgs = [
+                "--base-url", window.location.origin,
+                "--workers", workers,
+                "--model", model,
+                "--count", count,
+                "--out", out
+            ];
+
+            log(`[BENCH] Launching with args: ${cliArgs.join(" ")}`, "log-dim");
+
+            try {
+                log("[BENCH] Initializing .NET 10 WebAssembly Web Workers...");
+                const { runMain } = await dotnet
+                    .withDiagnosticTracing(false)
+                    .withConsoleForwarding()
+                    .withApplicationArguments(...cliArgs)
+                    .create();
+
+                log("[BENCH] Starting benchmark execution...");
+                const exitCode = await runMain();
+                log(`[BENCH] Benchmark completed with exit code: ${exitCode}`, "log-success");
+                statStatus.textContent = "Finished (0)";
+                progressFill.style.width = "100%";
+                progressPct.textContent = "100%";
+                progressText.textContent = "Completed successfully.";
+
+                await fetch('/api/done?exitCode=' + (exitCode ?? 0));
+            } catch (err) {
+                console.error(err);
+                log(`[BENCH] ERROR: ${err.stack || err}`, "log-entry");
+                statStatus.textContent = "Error";
+                await fetch('/api/done?exitCode=1&error=' + encodeURIComponent(err.stack || err.toString()));
+            } finally {
+                btnStart.disabled = false;
+            }
+        };
+
+        if (autoRun) {
+            log("[BENCH] Auto-run parameter detected, starting immediately...", "log-dim");
+            window.startBenchmark();
+        }
+    </script>
+</body>
+</html>

@@ -4,7 +4,7 @@
     `dotnet pack -p:Version=` must not flow into referenced projects; see Directory.Build.targets.
   -->
   <PropertyGroup>
-    <SdcbSimdPaddleOCRVersion Condition="'$(SdcbSimdPaddleOCRVersion)' == ''">1.0.0</SdcbSimdPaddleOCRVersion>
+    <SdcbSimdPaddleOCRVersion Condition="'$(SdcbSimdPaddleOCRVersion)' == ''">2.0.0</SdcbSimdPaddleOCRVersion>
     <SdcbSimdPaddleOCRModelProviderVersion Condition="'$(SdcbSimdPaddleOCRModelProviderVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelProviderVersion>
     <SdcbSimdPaddleOCRModelsTextLineOrientationVersion Condition="'$(SdcbSimdPaddleOCRModelsTextLineOrientationVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelsTextLineOrientationVersion>
     <SdcbSimdPaddleOCRModelsChineseV6TinyVersion Condition="'$(SdcbSimdPaddleOCRModelsChineseV6TinyVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelsChineseV6TinyVersion>
@@ -31,7 +31,7 @@
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdPaddleOCR'">
     <Version>$(SdcbSimdPaddleOCRVersion)</Version>
     <IsPackable>true</IsPackable>
-    <Description>Pure C# PP-OCRv6 inference (DET + CLS + REC). Cross-platform hand-written kernels and GEMM, very high performance, low memory requirements, and very high accuracy. No Paddle Inference, ONNX Runtime, or OpenCV native libraries. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32.</Description>
+    <Description>Pure C# PP-OCRv6 inference (DET + CLS + REC). Cross-platform hand-written kernels and GEMM; optional GPU backends over Vulkan and Metal (macOS), .NET 10 only. Very high performance, low memory requirements, and very high accuracy. No Paddle Inference, ONNX Runtime, or OpenCV native libraries. Accepts interleaved BGR24 / RGB24 / BGRA32 / RGBA32.</Description>
     <PackageTags>Sdcb;AI;OCR;PaddleOCR;PP-OCRv6;linqpad-samples</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdPaddleOCR.ModelProvider'">

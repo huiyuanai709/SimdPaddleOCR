@@ -159,8 +159,8 @@ public sealed partial class InferenceSession : IOcrSession
         if (TryGetPlan(inputShape, forCtc: PlanForCtcProjection, out ShapePlan? plan))
         {
             for (int i = 0; i < _tensors.Length; i++)
-                _tensors[i].SetShape(plan.Resolved[i]);
-            ApplyPlan(plan);
+                _tensors[i].SetShape(plan!.Resolved[i]);
+            ApplyPlan(plan!);
             _hasShape = true;
             return;
         }

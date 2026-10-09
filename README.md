@@ -4,6 +4,7 @@
 
 纯 C# PP-OCRv6 推理库：多平台手写 Kernel / GEMM 等算子、超高性能、低内存需求、超高准确率。
 自带托管 ONNX 解释器，不依赖 Paddle Inference、ONNX Runtime 或 OpenCV 原生库。
+GPU 支持 Vulkan 与 Metal（macOS），仅 .NET 10；同样纯 C#、不内嵌任何原生二进制。
 
 核心 API 接收交错像素内存（默认 BGR24，也可直接传 RGB24 / BGRA32 / RGBA32），不负责图片解码，因此不会强制引入 ImageSharp、SkiaSharp 或 OpenCvSharp。
 
@@ -148,9 +149,37 @@ Vulkan 默认选第一块独显（没有独显再选核显，最后才是 lavapi
 `min(ProcessorCount, 4)`）。检测阈值、边界长度、方向分类、
 动态识别宽度和 Session 缓存上限等也在同一组 options 里。
 
+## GPU 后端
+
+默认 `OcrBackend.Auto`：有满足条件的 GPU 就用，没有就留在 CPU，不用改代码。想固定后端，检测 / 方向 / 识别三个模型可以分别指定：
+
+```csharp
+using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default, new PaddleOcrOptions
+{
+    Detector   = new PaddleOcrDetectorOptions   { Backend = OcrBackend.Vulkan },
+    Recognizer = new PaddleOcrRecognizerOptions { Backend = OcrBackend.Vulkan },
+    Classifier = new PaddleOcrClassifierOptions { Backend = OcrBackend.Vulkan },
+});
+```
+
+Vulkan 直连系统加载器，macOS arm64 走 Metal。完全不用 GPU 就显式 `OcrBackend.Cpu`。GPU 后端只在 `net10.0` 下可用。
+
+## 逐字坐标框
+
+`Run` 传 `returnCtcAlignment: true` 后，每行会带上 `CtcSpans`，调 `EstimateCharacterBoxes()` 得到逐字符四边形坐标：
+
+```csharp
+PaddleOcrResult result = ocr.Run(bgr, width, height, returnCtcAlignment: true);
+foreach (PaddleOcrLine line in result.Lines)
+    foreach (PaddleOcrCharacterBox ch in line.EstimateCharacterBoxes())
+        Console.WriteLine($"{ch.Text} @ ({ch.X1:F0},{ch.Y1:F0})");
+```
+
+字符框由 CTC 对齐估算（字符间空白按中点切），适合做按字覆盖、打码。默认 `false`，不需要就不付这部分开销。
+
 ## 示例
 
-四个示例共用 `examples/sample.jpg`，图片由示例负责解码并转换为 BGR：
+四个示例共用 `examples/sample.jpg`，图片由示例负责解码为交错像素（BGR / RGB / BGRA / RGBA 均可）：
 
 - `examples/ImageSharp.AspNetCore`：ASP.NET Core + ImageSharp 3，可上传体验与 `POST /api/ocr` JSON API。
 - `examples/SkiaSharp.Avalonia`：Avalonia 桌面示例，SkiaSharp 解码。
@@ -194,6 +223,10 @@ x64 发布 Native AOT 时，可执行项目里**必须**设置：
 
 ImageSharp 默认分配器会把像素拆成 4MB 块，大图上拿不到一整块连续缓冲。按上面「ImageSharp 3」示例：`Clone` 一份 `Configuration` 后打开 `PreferContiguousImageBuffers`，仍不连续再 `CopyPixelDataTo`。不要改 `Configuration.Default`，否则 PNG/JPEG 解码器会丢。完整写法见 `examples/ImageSharp.AspNetCore/Program.cs`。
 
+### 为什么 GPU 没被用上？
+
+`Auto` 按设备能力选：没有协作矩阵 / subgroup 不满足要求、或实测跑不过 CPU 的设备类型会留在 CPU。要强制走 GPU，显式指定 `OcrBackend.Vulkan` / `OcrBackend.Metal`。注意 GPU 后端只在 `net10.0` 下编译，`netstandard2.0` 只有 CPU。
+
 ## 支持范围
 
 |            | 说明                                                                                                                        |
@@ -206,6 +239,7 @@ ImageSharp 默认分配器会把像素拆成 4MB 块，大图上拿不到一整�
 | 输入       | 交错像素内存（默认 BGR24，也可 RGB24 / BGRA32 / RGBA32）；无图片路径、文件或图片库 API                                      |
 | 设备       | 默认 CPU；`net10.0` 另有可选 GPU 后端（`OcrBackend`）：Vulkan 直连系统加载器（Windows `vulkan-1.dll`、Linux `libvulkan.so.1`、Android `libvulkan.so`），Metal 走 macOS 系统框架；`netstandard2.0` 只有 CPU |
 | 安卓       | 目前通过开发用宿主 `test/Sdcb.SimdPaddleOCR.AndroidBench`（`net10.0-android`，引用 `net10.0` 库，adb 驱动）在骁龙 8 Gen 3 上跑 CPU 与 Vulkan，见 [`docs/vulkan-8gen3.md`](docs/vulkan-8gen3.md)；桌面的 Vulkan 路由和 shader 没有变 |
+| WebAssembly | 通过开发用宿主 `test/Sdcb.SimdPaddleOCR.WasmBench`（`net10.0` `browser-wasm` 多线程 Web Workers + SharedArrayBuffer）跑 CPU 推理，支持 tiny / small / medium，详见 [`docs/wasm.md`](docs/wasm.md) |
 | NativeAOT  | 裁剪发布时请保留核心程序集和所用模型程序集                                                                                  |
 
 ## 许可证与第三方组件
@@ -226,24 +260,21 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 
 ## 性能
 
-**1.4.2** 相对 **1.3.0**：图级 NHWC 从仅 AVX2 扩到 ns2 / x64 scalar / net10 AdvSIMD，预处理直接写 NHWC。
-**内存占用大幅下降**：tiny-4w 工作集峰值大约少 **300 MB**（win-x64 817→**515 MB**，linux-arm64 840→**572 MB**），Δ WS 从约 400 MB 降到约 100–160 MB。
-CI tiny 满勤 **767/1032**、CER **2.36%**（cls 1020/1020；1.3 跳过首张是 757/1022、3.53%，尺子不同，不能当涨幅）。本机行精确仍是 742 / 950 / 1004；CER **2.78% → 2.37%**、**0.60% → 0.41%**、**0.67% → 0.14%**（左 1:4 CLS，倒长行先转正再进 REC）。
+**2.0** 新增纯 C# GPU 后端（Vulkan / Metal），medium 端到端相对同机 CPU：
 
-GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
+| 设备                      | 后端                 | 相对同机 CPU（medium）    |
+| ------------------------- | -------------------- | ------------------------: |
+| RTX 3080 Ti               | Vulkan（协作矩阵）   |                  **14.4×** |
+| Intel Arc B580            | Vulkan（协作矩阵）   |                   **9.6×** |
+| Apple M4（虚拟机）        | Metal                |                   **6.47×** |
+| AMD Radeon 880M 核显      | Vulkan（协作矩阵）   |                   **4.3×** |
+| 骁龙 8 Gen 3 / Adreno 750 | Vulkan（无协作矩阵） |                 **约 2.2×** |
+| Intel UHD 770 核显        | Vulkan（无协作矩阵） | 慢于 CPU，`Auto` 默认走 CPU |
 
-| 路径                                      |     1.3 |    1.4.2 |         相对 |       工作集峰值 |            Δ WS |
-| ----------------------------------------- | ------: | -------: | -----------: | ---------------: | --------------: |
-| linux-arm64 N2 `tiny-4w`（net10 AdvSIMD） |     241 |  **180** |    **0.75×** | 840 → **572 MB** | 418 → **162 MB** |
-| linux-arm64 `tiny-4w-ns2`                 |     374 |  **295** |    **0.79×** |                  |                 |
-| linux-arm64 `tiny-4w-scalar`              |     984 |  **856** |    **0.87×** |                  |                 |
-| win-x64 7763 `tiny-4w`（AVX2）            |     167 |     ~184 | 持平（噪声） | 817 → **515 MB** | 398 → **107 MB** |
-| win-x64 7763 `tiny-4w-ns2`                | **343** |  **228** |    **0.66×** |                  |                 |
-| win-x64 7763 `tiny-4w-noavx`              |     481 |  **380** |    **0.79×** |                  |                 |
-| win-x64 7763 `tiny-4w-scalar`             |    1368 | **1220** |    **0.89×** |                  |                 |
+CPU 路径在 2.0 也普遍再快 **4–15%**（CTC ArgMax 并行化、动态 intra-op 线程预算、DET 后处理重写；ARM64 另有手写 AdvSIMD MatMul）。
+WebAssembly（`browser-wasm` 多线程 + LLVM AOT）下 tiny 中位 **103 ms/张**，约为同机桌面原生的 2.3 倍。
 
-本机 Ryzen 7 5800X、4 worker、仓库 `dataset/` 100 张（n=99）本库 mean（1.3 NuGet → 1.4.2）：tiny **86.0 → 63.1 ms**（0.73×），small **222 → 200 ms**（0.90×），medium **628 → 585 ms**（0.93×）。同机 ns2：tiny **203 → 96.5 ms**（0.48×），small **432 → 303 ms**（0.70×），medium **1606 → 874 ms**（0.54×）。
-同机 C 引擎与各 ISA 比值见 [`docs/perf.md`](docs/perf.md)。
+每台设备的完整跑分、精度表和复现命令见 [`docs/perf.md`](docs/perf.md) 与 `docs/` 下各机型报告（`vulkan-*.md`、`metal-m4.md`、`wasm.md`）。
 
 ## 性能复现
 
@@ -253,6 +284,6 @@ GitHub-hosted runner、PP-OCRv6 tiny、去掉首张 warmup 后的中位墙钟：
 
 ## 微信群
 
-![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?0922)
+![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1008)
 
 如果微信群二维码过期了，请加入 QQ 群 [C#/.NET计算机视觉技术交流 579060605](https://qm.qq.com/q/bPw5jAK4qk)。

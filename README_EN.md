@@ -4,6 +4,7 @@
 
 Pure C# PP-OCRv6 inference library: cross-platform hand-written kernels and GEMM, very high performance, low memory requirements, and very high accuracy.
 It ships a managed ONNX interpreter and does not depend on Paddle Inference, ONNX Runtime, or OpenCV native libraries.
+GPU support: Vulkan and Metal (macOS), .NET 10 only — still pure C#, with no bundled native binaries.
 
 The core API accepts interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 are also first-class). It does not decode images, so ImageSharp, SkiaSharp, or OpenCvSharp are not required.
 
@@ -146,9 +147,37 @@ Do not mix the two parallelism knobs in `PaddleOcrOptions`: `DetIntraOpThreads` 
 `min(ProcessorCount, 4)`). Detection thresholds, min box side, orientation classification,
 dynamic recognition width, and session cache limits live in the same options object.
 
+## GPU backends
+
+The default is `OcrBackend.Auto`: use a capable GPU when one is present, stay on CPU otherwise — no code changes needed. To pin a backend, the detection / orientation / recognition models can each be set independently:
+
+```csharp
+using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default, new PaddleOcrOptions
+{
+    Detector   = new PaddleOcrDetectorOptions   { Backend = OcrBackend.Vulkan },
+    Recognizer = new PaddleOcrRecognizerOptions { Backend = OcrBackend.Vulkan },
+    Classifier = new PaddleOcrClassifierOptions { Backend = OcrBackend.Vulkan },
+});
+```
+
+Vulkan loads the system loader directly; Metal covers macOS arm64. Pass `OcrBackend.Cpu` to stay off the GPU entirely. GPU backends are only compiled in the `net10.0` target.
+
+## Per-character boxes
+
+Pass `returnCtcAlignment: true` to `Run` and each line carries `CtcSpans`; `EstimateCharacterBoxes()` then returns a per-character quad:
+
+```csharp
+PaddleOcrResult result = ocr.Run(bgr, width, height, returnCtcAlignment: true);
+foreach (PaddleOcrLine line in result.Lines)
+    foreach (PaddleOcrCharacterBox ch in line.EstimateCharacterBoxes())
+        Console.WriteLine($"{ch.Text} @ ({ch.X1:F0},{ch.Y1:F0})");
+```
+
+Character boxes are estimated from CTC alignment (gaps are split at the midpoint), good enough for per-character overlays and redaction. The default is `false`, so you pay nothing unless you ask for it.
+
 ## Examples
 
-All four samples share `examples/sample.jpg`. Each sample decodes the image and converts it to BGR:
+All four samples share `examples/sample.jpg`. Each sample decodes the image into interleaved pixels (BGR / RGB / BGRA / RGBA are all accepted):
 
 - `examples/ImageSharp.AspNetCore`: ASP.NET Core + ImageSharp 3, upload UI and `POST /api/ocr` JSON API.
 - `examples/SkiaSharp.Avalonia`: Avalonia desktop sample, SkiaSharp decode.
@@ -192,6 +221,10 @@ Without it, ILC targets the SSE2 / 128-bit `Vector<T>` baseline, `Avx2.IsSupport
 
 ImageSharp's default allocator splits pixels into 4MB chunks, so large images do not get one packed buffer. Follow the ImageSharp 3 sample above: clone `Configuration`, set `PreferContiguousImageBuffers`, and fall back to `CopyPixelDataTo`. Do not mutate `Configuration.Default` or PNG/JPEG decoders disappear. The full pattern is in `examples/ImageSharp.AspNetCore/Program.cs`.
 
+### Why isn't the GPU being used?
+
+`Auto` picks by device capability: devices without cooperative matrix / subgroup support, or device types that measure slower than CPU, stay on CPU. To force GPU, pass `OcrBackend.Vulkan` / `OcrBackend.Metal` explicitly. GPU backends are only compiled for `net10.0`; `netstandard2.0` is CPU only.
+
 ## Support
 
 |                     | Notes                                                                                                                                                                    |
@@ -202,8 +235,9 @@ ImageSharp's default allocator splits pixels into 4MB chunks, so large images do
 | CI architectures    | Windows x64 / x86 / ARM64, Linux x64 / ARM64, macOS x64 / ARM64                                                                                                          |
 | SIMD                | .NET 10 probes AVX → AVX2 → AVX-512 / VNNI at runtime; Vector/scalar when those ISAs are missing or on ARM                                                               |
 | Input               | Interleaved pixels (BGR24 by default; RGB24 / BGRA32 / RGBA32 also accepted); no image path, file, or image-library API                                                  |
-| Device              | CPU by default; `net10.0` also has an optional Vulkan backend (`OcrBackend`) loading the system loader directly: `vulkan-1.dll` on Windows, `libvulkan.so.1` on Linux, `libvulkan.so` on Android; `netstandard2.0` is CPU only |
+| Device              | CPU by default; `net10.0` also has optional GPU backends (`OcrBackend`): Vulkan loading the system loader directly (`vulkan-1.dll` on Windows, `libvulkan.so.1` on Linux, `libvulkan.so` on Android), Metal via the macOS system framework; `netstandard2.0` is CPU only |
 | Android             | Currently run through the dev host `test/Sdcb.SimdPaddleOCR.AndroidBench` (`net10.0-android`, references the `net10.0` library, driven over adb) on a Snapdragon 8 Gen 3, CPU and Vulkan; see [`docs/vulkan-8gen3.md`](docs/vulkan-8gen3.md). Desktop Vulkan routing and shaders are unchanged |
+| WebAssembly         | Benchmarked via dev host `test/Sdcb.SimdPaddleOCR.WasmBench` (`net10.0` `browser-wasm` multi-threaded Web Workers + SharedArrayBuffer) running pure CPU inference across tiny / small / medium models; see [`docs/wasm.md`](docs/wasm.md) |
 | NativeAOT           | Keep the core assembly and the model assemblies you use when publishing trimmed                                                                                          |
 
 ## License and third-party components
@@ -224,24 +258,21 @@ respective owners. This project is not official and does not imply endorsement.
 
 ## Performance
 
-**1.4.2** vs **1.3.0**: graph-level NHWC now covers ns2 / x64 scalar / net10 AdvSIMD, and preprocess writes NHWC directly.
-**Memory dropped sharply**: tiny-4w working-set peak is about **300 MB** lower (win-x64 817→**515 MB**, linux-arm64 840→**572 MB**); Δ WS fell from ~400 MB to ~100–160 MB.
-CI tiny is **767/1032**, CER **2.36%** on the full 100 (cls 1020/1020; 1.3 skip-first was 757/1022, 3.53% — different ruler, not a tiny gain). Local exact_lines stay 742 / 950 / 1004; CER is **2.78% → 2.37%**, **0.60% → 0.41%**, **0.67% → 0.14%** (left 4:1 CLS, inverted long lines rotate before REC).
+**2.0** adds pure C# GPU backends (Vulkan / Metal). Medium model end-to-end versus the same machine's CPU:
 
-Median wall time per image on GitHub-hosted runners, PP-OCRv6 tiny, first image excluded as warmup:
+| Device                            | Backend                     | vs same-machine CPU (medium)          |
+| --------------------------------- | --------------------------- | ------------------------------------: |
+| RTX 3080 Ti                       | Vulkan (cooperative matrix) |                             **14.4×** |
+| Intel Arc B580                    | Vulkan (cooperative matrix) |                              **9.6×** |
+| Apple M4 (VM)                     | Metal                       |                             **6.47×** |
+| AMD Radeon 880M iGPU              | Vulkan (cooperative matrix) |                              **4.3×** |
+| Snapdragon 8 Gen 3 / Adreno 750   | Vulkan (no coop matrix)     |                             **~2.2×** |
+| Intel UHD 770 iGPU                | Vulkan (no coop matrix)     | Slower than CPU; `Auto` stays on CPU  |
 
-| Path                                     |     1.3 |    1.4.2 |       vs 1.3 |          WS peak |            Δ WS |
-| ---------------------------------------- | ------: | -------: | -----------: | ---------------: | --------------: |
-| linux-arm64 N2 `tiny-4w` (net10 AdvSIMD) |     241 |  **180** |    **0.75×** | 840 → **572 MB** | 418 → **162 MB** |
-| linux-arm64 `tiny-4w-ns2`                |     374 |  **295** |    **0.79×** |                  |                 |
-| linux-arm64 `tiny-4w-scalar`             |     984 |  **856** |    **0.87×** |                  |                 |
-| win-x64 7763 `tiny-4w` (AVX2)            |     167 |     ~184 | flat (noise) | 817 → **515 MB** | 398 → **107 MB** |
-| win-x64 7763 `tiny-4w-ns2`               | **343** |  **228** |    **0.66×** |                  |                 |
-| win-x64 7763 `tiny-4w-noavx`             |     481 |  **380** |    **0.79×** |                  |                 |
-| win-x64 7763 `tiny-4w-scalar`            |    1368 | **1220** |    **0.89×** |                  |                 |
+The CPU path is another **4–15%** faster across the board in 2.0 (parallel CTC ArgMax, dynamic intra-op thread budget, rewritten DET postprocess; plus a hand-written AdvSIMD MatMul on ARM64).
+Under WebAssembly (`browser-wasm`, multi-threaded + LLVM AOT), tiny runs at a **103 ms/image** median — about 2.3× the same machine's desktop native.
 
-Local Ryzen 7 5800X, 4 workers, repo `dataset/` 100 images (n=99), this library mean (1.3 NuGet → 1.4.2): tiny **86.0 → 63.1 ms** (0.73×), small **222 → 200 ms** (0.90×), medium **628 → 585 ms** (0.93×). Same machine ns2: tiny **203 → 96.5 ms** (0.48×), small **432 → 303 ms** (0.70×), medium **1606 → 874 ms** (0.54×).
-Same-machine C engine and per-ISA ratios: [`docs/perf.md`](docs/perf.md).
+Full benchmarks, accuracy tables, and reproduction commands per device: [`docs/perf.md`](docs/perf.md) and the per-machine reports under `docs/` (`vulkan-*.md`, `metal-m4.md`, `wasm.md`).
 
 ## Reproducing performance
 
@@ -251,6 +282,6 @@ runs unit tests and benches tiny / small / medium on Windows / Linux / macOS acr
 
 ## WeChat group
 
-![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?0922)
+![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1008)
 
 If the WeChat QR code has expired, join the QQ group [C#/.NET Computer Vision 579060605](https://qm.qq.com/q/bPw5jAK4qk).
