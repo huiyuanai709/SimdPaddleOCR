@@ -227,6 +227,13 @@ ImageSharp 默认分配器会把像素拆成 4MB 块，大图上拿不到一整�
 
 `Auto` 按设备能力选：没有协作矩阵 / subgroup 不满足要求、或实测跑不过 CPU 的设备类型会留在 CPU。要强制走 GPU，显式指定 `OcrBackend.Vulkan` / `OcrBackend.Metal`。注意 GPU 后端只在 `net10.0` 下编译，`netstandard2.0` 只有 CPU。
 
+### GPU（Vulkan/Metal）下 medium 模型报错 `BuildPlan failed at node 256 op=Transpose` 并回退 CPU？
+
+请检查是否使用了第三方未优化的 ONNX 模型（例如直接通过 paddle2onnx 导出但未经过图优化清理的版本）。
+
+- **原因**：SimdPaddleOCR 的 GPU 调度器为 SVTR 识别模型的注意力机制编写了专属的高性能融合算子（`attn` 着色器），该算子需要识别模型具备规整的计算图拓扑。如果使用含有大量未消除节点（如未折叠的 `Identity`、动态 `Shape/Reshape` 链）的外部直出 ONNX 模型，图构建器可能无法匹配该注意力融合模式，从而将内部的 5 维 Transpose 降级为独立算子调度；而 GPU 独立转置仅支持常规通道对齐维度，进而触发 `NotSupportedException` 并迫使引擎回退到 CPU 推理。
+- **解决方式**：推荐直接使用 SimdPaddleOCR 官方配套的模型 NuGet 包（例如 `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium`），或使用官方发布包中已做好图优化的 ONNX 模型。
+
 ## 支持范围
 
 |            | 说明                                                                                                                        |

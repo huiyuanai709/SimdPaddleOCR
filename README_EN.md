@@ -225,6 +225,13 @@ ImageSharp's default allocator splits pixels into 4MB chunks, so large images do
 
 `Auto` picks by device capability: devices without cooperative matrix / subgroup support, or device types that measure slower than CPU, stay on CPU. To force GPU, pass `OcrBackend.Vulkan` / `OcrBackend.Metal` explicitly. GPU backends are only compiled for `net10.0`; `netstandard2.0` is CPU only.
 
+### GPU (Vulkan/Metal) falls back to CPU with `BuildPlan failed at node 256 op=Transpose` on the medium model?
+
+Check if you are loading an unoptimized third-party ONNX model (such as a raw paddle2onnx export without graph cleanup).
+
+- **Cause**: SimdPaddleOCR's GPU scheduler uses a fused compute kernel (`attn`) for the SVTR recognition model's multi-head self-attention. This fusion relies on a normalized graph topology. If you load an unoptimized ONNX model containing redundant nodes (e.g. uncollapsed `Identity` nodes or dynamic `Shape`/`Reshape` chains), the graph planner may fail to match the attention fusion pattern. The un-fused 5-D Transpose is then emitted as a standalone operator, which throws `NotSupportedException` because standalone GPU transposition only supports channel-aligned layouts, causing the engine to fall back to CPU.
+- **Solution**: Use the official model NuGet packages (such as `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium`) or the optimized ONNX models distributed with this repository.
+
 ## Support
 
 |                     | Notes                                                                                                                                                                    |
