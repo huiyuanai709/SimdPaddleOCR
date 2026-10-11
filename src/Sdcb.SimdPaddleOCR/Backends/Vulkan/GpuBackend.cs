@@ -20,16 +20,22 @@ internal static class GpuBackend
         lock (s_probeLock)
         {
             if (s_probed) return s_device;
-            try { s_device = VkDevice.Create(OcrVulkan.EffectiveSelector); }
+            // browser/WASI: unlinked P/Invokes trap the wasm module ("null
+            // function") instead of throwing, so never touch Vulkan there.
+            try { s_device = IsVulkanUnavailable ? null : VkDevice.Create(OcrVulkan.EffectiveSelector); }
             catch { s_device = null; }
             s_probed = true;
             return s_device;
         }
     }
 
+    private static bool IsVulkanUnavailable =>
+        OperatingSystem.IsBrowser() || OperatingSystem.IsWasi();
+
     /// <summary>Whether the given option resolves to the Vulkan path.</summary>
     internal static bool IsVulkanSelected(OcrBackend backend) => backend switch
     {
+        _ when IsVulkanUnavailable => false,
         OcrBackend.Vulkan => true,
         OcrBackend.Cpu => false,
         _ => Environment.GetEnvironmentVariable("SIMD_OCR_BACKEND") switch

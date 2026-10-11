@@ -164,6 +164,31 @@ using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Defaul
 
 Vulkan 直连系统加载器，macOS arm64 走 Metal。完全不用 GPU 就显式 `OcrBackend.Cpu`。GPU 后端只在 `net10.0` 下可用。
 
+### GPU 模式的 CPU 线程预算
+
+GPU OCR 仍在 CPU 上执行裁剪、缩放归一化，以及识别结果的词表投影和 ArgMax。
+可分别通过 `PreprocessWorkerCount` 与 `GpuCtcIntraOpThreads` 控制这些阶段的线程数：
+
+```csharp
+var options = new PaddleOcrOptions
+{
+    Detector = new() { Backend = OcrBackend.Vulkan },
+    Classifier = new() { Backend = OcrBackend.Vulkan },
+    Recognizer = new() { Backend = OcrBackend.Vulkan },
+    GpuCtcIntraOpThreads = 4,
+    PreprocessWorkerCount = 6
+};
+using var ocr = PaddleOcrAll.Load(ChineseV6TinyModels.Default, options);
+```
+
+两项默认 `0` 保留原自动预算；显式值允许 `1..16`，并限制到逻辑处理器数。
+`GpuCtcIntraOpThreads` 不限制纯 CPU 推理或 GPU 失败后的 CPU 图算子预算。
+`PreprocessWorkerCount` 在 CPU 模式也限制透视裁剪，但不改变检测预处理或图算子预算。
+
+多张图片可共享同一实例，并由调用端限制图片并发，例如 `ParallelOptions.MaxDegreeOfParallelism = 2`。
+图片并发与文本行 `LineWorkerCount` 是不同维度。降低每次调用的线程数可能降低进程 CPU，也可能降低吞吐或增加单张延迟；
+应在相同模型、图片尺寸和方向分类选项下预热后比较，分别观察批量吞吐与单张延迟。上例的 `4/6` 是可测试的起点，不能视为所有设备的最优参数。
+
 ## 逐字坐标框
 
 `Run` 传 `returnCtcAlignment: true` 后，每行会带上 `CtcSpans`，调 `EstimateCharacterBoxes()` 得到逐字符四边形坐标：
@@ -289,8 +314,18 @@ WebAssembly（`browser-wasm` 多线程 + LLVM AOT）下 tiny 中位 **103 ms/张
 会跑单元测试，并在 Windows / Linux / macOS 多架构上对 tiny / small / medium 做 bench
 （含关闭 AVX-512 / AVX2 / AVX / 全部硬件加速，以及 `netstandard2.0` 库）。汇总报告写入 job summary 与 `perf-report` artifact。
 
+## 特别感谢
+
+### AbcRed AI
+
+感谢 [AbcRed AI](https://ai.abc.red/account/register?inviteCode=dvgkwx4w) 对本项目的赞助支持。
+
+本项目中大量深度优化（SIMD 算子、GPU 后端、Vulkan / Metal shader 等）都是借助 Fable 5.1 / Opus 5.5 等当红旗舰模型强力推进完成的，AbcRed AI 提供的稳定、充足的模型额度，让这些高强度的优化迭代得以持续进行。
+
+👉 [点击注册 AbcRed AI](https://ai.abc.red/account/register?inviteCode=dvgkwx4w)（邀请码：`dvgkwx4w`）
+
 ## 微信群
 
-![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1008)
+![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1011)
 
 如果微信群二维码过期了，请加入 QQ 群 [C#/.NET计算机视觉技术交流 579060605](https://qm.qq.com/q/bPw5jAK4qk)。
