@@ -1110,6 +1110,10 @@ public sealed class Model : IDisposable
 
     private static (DType Type, byte[] Data) TensorBytes(OnnxTensorData tensor)
     {
+        // FLOAT16 initializers are widened here so a packaged model can stay
+        // under GitHub's 100MB blob limit. The graph still executes in float32.
+        if (tensor.DataType == 10)
+            return (DType.F32, WidenFloat16(tensor));
         DType type = MapDType(tensor.DataType);
         if (tensor.RawData.Length != 0) return (type, tensor.RawData);
         if (type == DType.F32)
@@ -1171,6 +1175,48 @@ public sealed class Model : IDisposable
         for (int i = 0; i < values.Length; i++)
             values[i] = BitConverterCompat.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(i * 4, 4)));
         return values;
+    }
+
+    private static byte[] WidenFloat16(OnnxTensorData tensor)
+    {
+        byte[] raw = tensor.RawData;
+        if (raw.Length == 0 || (raw.Length & 1) != 0)
+            throw new NotSupportedException("FLOAT16 initializers must be stored in raw_data.");
+        byte[] data = new byte[raw.Length * 2];
+        for (int i = 0; i < raw.Length; i += 2)
+        {
+            float value = SingleFromFloat16Bits(BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(i, 2)));
+            BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(i * 2, 4), BitConverterCompat.SingleToInt32Bits(value));
+        }
+        return data;
+    }
+
+    internal static float SingleFromFloat16Bits(ushort bits)
+    {
+        int sign = (bits & 0x8000) << 16;
+        int exponent = (bits >> 10) & 0x1F;
+        int mantissa = bits & 0x3FF;
+        int value;
+        if (exponent == 0)
+        {
+            if (mantissa == 0) value = sign;
+            else
+            {
+                exponent = -14;
+                while ((mantissa & 0x400) == 0)
+                {
+                    mantissa <<= 1;
+                    exponent--;
+                }
+                mantissa &= 0x3FF;
+                value = sign | ((exponent + 127) << 23) | (mantissa << 13);
+            }
+        }
+        else if (exponent == 31)
+            value = sign | 0x7F800000 | (mantissa << 13);
+        else
+            value = sign | ((exponent + (127 - 15)) << 23) | (mantissa << 13);
+        return BitConverterCompat.Int32BitsToSingle(value);
     }
 
     private static DType MapDType(int type) => type switch

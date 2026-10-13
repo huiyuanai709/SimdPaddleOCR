@@ -124,8 +124,44 @@ finally
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Small`      | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small)           | PP-OCRv6 small；`ChineseV6SmallModels.Default`                                 |
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium)         | PP-OCRv6 medium；`ChineseV6MediumModels.Default`                               |
 | `Sdcb.SimdPaddleOCR.Models.TextLineOrientation` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.TextLineOrientation.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.TextLineOrientation) | PP-LCNet 文本行方向 CLS，被三个中文模型包传递引用                              |
+| `Sdcb.SimdPaddleOCR.Models.SealV4Mobile`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.SealV4Mobile.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.SealV4Mobile)             | PP-OCRv4 mobile 印章检测；`SealV4MobileModel.Detection`（约 4.6MB）            |
+| `Sdcb.SimdPaddleOCR.Models.SealV4Server`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.SealV4Server.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.SealV4Server)             | PP-OCRv4 server 印章检测；`SealV4ServerModel.Detection`（float16 打包，约 56MB） |
 
 每个 `IPaddleOcrModelProvider` 提供 `Name`、`Kind`、`Format`、语言和版本元数据以及 `OpenRead()` / `OpenReadAsync()`。完整 OCR 组合由 `PaddleOcrModelBundle` 表达（DET、REC、字典和可选 CLS）。当前语言代码为 `zh`。单个模型也可被其他推理实现消费，例如 `ChineseV6TinyModel.Detection.OpenReadAsync()`。`Model`、`PaddleOcrDetector`、`PaddleOcrClassifier`、`PaddleOcrRecognizer` 和 `PaddleOcrAll` 均提供 Stream 加载入口；解析完成后不会继续保留完整的 ONNX 原始字节。
+
+## 印章文字（公章）
+
+印章检测模型输出弯曲环排文字的多边形。用 `PaddleOcrSealAll` 加载印章检测模型，拉直每一条环排文字，再交给现有的 PP-OCRv6 识别模型。`Kind` 仍是 `Detection`，调用入口是 `PaddleOcrSealAll` / `PaddleOcrSealDetector`。
+
+```csharp
+using Sdcb.SimdPaddleOCR;
+using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
+using Sdcb.SimdPaddleOCR.Models.SealV4Mobile;
+
+using PaddleOcrSealAll seal = PaddleOcrSealAll.Load(
+    SealV4MobileModel.Detection,
+    ChineseV6TinyModel.Recognition,
+    ChineseV6TinyModel.Dictionary);
+
+PaddleOcrSealResult result = seal.Run(bgr, width, height, format: ImagePixelFormat.Bgr24);
+foreach (PaddleOcrSealLine line in result.Lines)
+{
+    string text = line.Text;
+    float recognitionScore = line.RecognitionScore;
+    float detectionScore = line.DetectionScore;
+    PaddleOcrPoint[] polygon = line.Polygon.Points;
+}
+```
+
+更高精度的检测权重是 `SealV4ServerModel.Detection`（`Sdcb.SimdPaddleOCR.Models.SealV4Server`）。这个包把权重存成 float16，加载时还原为 float32。只做检测时：
+
+```csharp
+using Stream model = SealV4MobileModel.Detection.OpenRead();
+using PaddleOcrSealDetector detector = new(model);
+PaddleOcrSealDetectionResult detected = detector.Detect(bgr, width, height);
+```
+
+默认与 PaddleX `seal_recognition` 对齐：短边 736（`PaddleOcrSideLimit.Min`）、最长边 4000、bitmap 阈值 0.2、box 阈值 0.6、unclip 0.5。`PaddleOcrSealRectify.Rectify` 按 `dc_homo` 把弯弧拉成横条。方向分类默认关闭。
 
 ## 使用本地模型
 

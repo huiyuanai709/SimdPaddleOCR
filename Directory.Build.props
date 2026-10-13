@@ -10,6 +10,8 @@
     <SdcbSimdPaddleOCRModelsChineseV6TinyVersion Condition="'$(SdcbSimdPaddleOCRModelsChineseV6TinyVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelsChineseV6TinyVersion>
     <SdcbSimdPaddleOCRModelsChineseV6SmallVersion Condition="'$(SdcbSimdPaddleOCRModelsChineseV6SmallVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelsChineseV6SmallVersion>
     <SdcbSimdPaddleOCRModelsChineseV6MediumVersion Condition="'$(SdcbSimdPaddleOCRModelsChineseV6MediumVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelsChineseV6MediumVersion>
+    <SdcbSimdPaddleOCRModelsSealV4MobileVersion Condition="'$(SdcbSimdPaddleOCRModelsSealV4MobileVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelsSealV4MobileVersion>
+    <SdcbSimdPaddleOCRModelsSealV4ServerVersion Condition="'$(SdcbSimdPaddleOCRModelsSealV4ServerVersion)' == ''">1.0.0</SdcbSimdPaddleOCRModelsSealV4ServerVersion>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -58,6 +60,16 @@
     <Version>$(SdcbSimdPaddleOCRModelsChineseV6MediumVersion)</Version>
     <IsPackable>true</IsPackable>
     <Description>Embedded PP-OCRv6 medium Chinese DET+REC+dictionary models.</Description>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdPaddleOCR.Models.SealV4Mobile'">
+    <Version>$(SdcbSimdPaddleOCRModelsSealV4MobileVersion)</Version>
+    <IsPackable>true</IsPackable>
+    <Description>Embedded PP-OCRv4 mobile seal text detection model (PP-OCRv4_mobile_seal_det).</Description>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Sdcb.SimdPaddleOCR.Models.SealV4Server'">
+    <Version>$(SdcbSimdPaddleOCRModelsSealV4ServerVersion)</Version>
+    <IsPackable>true</IsPackable>
+    <Description>Embedded PP-OCRv4 server seal text detection model (PP-OCRv4_server_seal_det).</Description>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsPackable)' == 'true'">

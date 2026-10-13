@@ -24,6 +24,16 @@ Sources:
 - <https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_det_onnx>
 - <https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_rec_onnx>
 - <https://huggingface.co/PaddlePaddle/PP-LCNet_x0_25_textline_ori_onnx>
+- <https://huggingface.co/PaddlePaddle/PP-OCRv4_mobile_seal_det>
+- <https://huggingface.co/PaddlePaddle/PP-OCRv4_server_seal_det>
+
+The seal detection weights ship as Paddle inference models (`inference.json` +
+`inference.pdiparams`). The ONNX files in this repository
+(`models/seal_v4_mobile_det.onnx`, `models/seal_v4_server_det.onnx`) were
+exported with paddle2onnx 2.1.0 at opset 11 and simplified with onnxsim.
+`seal_v4_server_det.onnx` stores FLOAT initializers as FLOAT16 so the blob
+stays within GitHub's file-size limit; `Model.Load` widens those weights back
+to float32 before the graph runs. They remain Apache-2.0 assets from PaddlePaddle.
 
 The model files are distributed for use with this project and remain subject
 to the upstream model terms. PaddleOCR and PP-OCR are trademarks of their

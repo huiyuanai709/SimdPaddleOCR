@@ -124,8 +124,44 @@ finally
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Small`      | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small)           | PP-OCRv6 small; `ChineseV6SmallModels.Default`                                                        |
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Medium`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium)         | PP-OCRv6 medium; `ChineseV6MediumModels.Default`                                                      |
 | `Sdcb.SimdPaddleOCR.Models.TextLineOrientation` | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.TextLineOrientation.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.TextLineOrientation) | PP-LCNet text-line orientation CLS, transitively referenced by the three Chinese model packages       |
+| `Sdcb.SimdPaddleOCR.Models.SealV4Mobile`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.SealV4Mobile.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.SealV4Mobile)             | PP-OCRv4 mobile seal text detection; `SealV4MobileModel.Detection` (~4.6MB)    |
+| `Sdcb.SimdPaddleOCR.Models.SealV4Server`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.SealV4Server.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.SealV4Server)             | PP-OCRv4 server seal text detection; `SealV4ServerModel.Detection` (float16 package, ~56MB) |
 
 Each `IPaddleOcrModelProvider` exposes `Name`, `Kind`, `Format`, language and version metadata, plus `OpenRead()` / `OpenReadAsync()`. A full OCR set is a `PaddleOcrModelBundle` (DET, REC, dictionary, and optional CLS). The current language code is `zh`. Individual models can also be consumed by other inference implementations, for example `ChineseV6TinyModel.Detection.OpenReadAsync()`. `Model`, `PaddleOcrDetector`, `PaddleOcrClassifier`, `PaddleOcrRecognizer`, and `PaddleOcrAll` all accept Stream load entry points; after parsing they do not keep the full raw ONNX bytes.
+
+## Seal text (company stamps)
+
+Seal detection models emit polygons around curved ring text. `PaddleOcrSealAll` loads a seal detector, straightens each ring, and recognizes the strip with an existing PP-OCRv6 recognizer. The provider `Kind` stays `Detection`; call `PaddleOcrSealAll` or `PaddleOcrSealDetector`.
+
+```csharp
+using Sdcb.SimdPaddleOCR;
+using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
+using Sdcb.SimdPaddleOCR.Models.SealV4Mobile;
+
+using PaddleOcrSealAll seal = PaddleOcrSealAll.Load(
+    SealV4MobileModel.Detection,
+    ChineseV6TinyModel.Recognition,
+    ChineseV6TinyModel.Dictionary);
+
+PaddleOcrSealResult result = seal.Run(bgr, width, height, format: ImagePixelFormat.Bgr24);
+foreach (PaddleOcrSealLine line in result.Lines)
+{
+    string text = line.Text;
+    float recognitionScore = line.RecognitionScore;
+    float detectionScore = line.DetectionScore;
+    PaddleOcrPoint[] polygon = line.Polygon.Points;
+}
+```
+
+The higher-accuracy detector is `SealV4ServerModel.Detection` (`Sdcb.SimdPaddleOCR.Models.SealV4Server`). That package stores weights as float16; loading widens them to float32. Detection only:
+
+```csharp
+using Stream model = SealV4MobileModel.Detection.OpenRead();
+using PaddleOcrSealDetector detector = new(model);
+PaddleOcrSealDetectionResult detected = detector.Detect(bgr, width, height);
+```
+
+Defaults follow the PaddleX `seal_recognition` pipeline: short side 736 (`PaddleOcrSideLimit.Min`), max side 4000, bitmap threshold 0.2, box threshold 0.6, unclip 0.5. `PaddleOcrSealRectify.Rectify` straightens an arc with the `dc_homo` homography stitch. Text-line orientation stays off.
 
 ## Local models
 
