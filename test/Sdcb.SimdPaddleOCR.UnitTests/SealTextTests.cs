@@ -33,7 +33,8 @@ public class SealTextTests
         var options = new PaddleOcrSealDetectorOptions { LimitType = PaddleOcrSideLimit.Max, LimitSideLength = 736 };
         (int width, int height) = PaddleOcrSealDetector.ComputeInputSize(1000, 500, options);
         Assert.Equal(736, width);
-        Assert.Equal(368, height);
+        // 368 / 32 = 11.5, and Python round() is half-to-even, so the height becomes 384.
+        Assert.Equal(384, height);
     }
 
     [Fact]
