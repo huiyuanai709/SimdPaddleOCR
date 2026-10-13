@@ -22,18 +22,20 @@ static void DotNetRun(string args) => Run("dotnet", args.Dump(), Encoding.GetEnc
 static void Run(string exe, string args, Encoding encoding) => Util.Cmd(exe, args, encoding);
 
 // Independent package versions. Sdcb.SimdPaddleOCR is expected to ship often;
-// ModelProvider and the four model packages should stay stable.
+// ModelProvider and the model packages should stay stable.
 // Keep Directory.Build.props defaults in sync.
 // Do not pack with -p:Version=; pack passes these properties instead so a 1.0.1
 // SimdPaddleOCR package can depend on ModelProvider 1.0.0.
 static ProjectVersion[] Projects =
 {
-	new("Sdcb.SimdPaddleOCR", "2.0.0"),
+	new("Sdcb.SimdPaddleOCR", "2.1.0"),
 	new("Sdcb.SimdPaddleOCR.ModelProvider", "1.0.0"),
 	new("Sdcb.SimdPaddleOCR.Models.TextLineOrientation", "1.0.0"),
 	new("Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny", "1.0.0"),
 	new("Sdcb.SimdPaddleOCR.Models.ChineseV6Small", "1.0.0"),
 	new("Sdcb.SimdPaddleOCR.Models.ChineseV6Medium", "1.0.0"),
+	new("Sdcb.SimdPaddleOCR.Models.SealV4Mobile", "1.0.0"),
+	new("Sdcb.SimdPaddleOCR.Models.SealV4Server", "1.0.0"),
 };
 
 static string VersionPropertyName(string projectName) => projectName.Replace(".", "") + "Version";

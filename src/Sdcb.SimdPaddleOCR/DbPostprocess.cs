@@ -793,4 +793,32 @@ internal static class DbPostprocess
     }
     private static float Distance(Point a, Point b) => MathF.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
     private static float Clamp(float value, int limit) => value < 0 ? 0 : value > limit ? limit : value;
+
+    /// <summary>DB polygon unclip (round-join offset). Same construction the quad path uses before its min-area rect.</summary>
+    internal static Point[] ExpandPolygon(ReadOnlySpan<Point> box, float ratio) => Unclip(box, ratio);
+
+    internal static float MeanScore(ReadOnlySpan<float> prediction, int width, int height, ReadOnlySpan<Point> polygon)
+        => PolygonScore(prediction, width, height, polygon);
+
+    internal static bool TryOrderedMinAreaQuad(ReadOnlySpan<Point> points, Span<Point> corners)
+    {
+        if (points.Length < 3 || corners.Length < 4) return false;
+        Point[] copy = points.ToArray();
+        Point[] hull = [];
+        return TryMinimumRectangle(copy, copy.Length, ref hull, out _, corners);
+    }
+
+    internal static bool TryShortestSide(ReadOnlySpan<Point> points, out float shortest)
+    {
+        shortest = 0;
+        if (points.Length < 3) return false;
+        Point[] copy = points.ToArray();
+        Point[] hull = [];
+        Span<Point> corners = stackalloc Point[4];
+        if (!TryMinimumRectangle(copy, copy.Length, ref hull, out Rectangle rectangle, corners)) return false;
+        shortest = MathF.Min(rectangle.MaxU - rectangle.MinU, rectangle.MaxV - rectangle.MinV);
+        return MathCompat.IsFinite(shortest);
+    }
+
+    internal static double AbsoluteArea(ReadOnlySpan<Point> points) => Math.Abs(SignedArea(points));
 }

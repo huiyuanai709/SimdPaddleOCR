@@ -32,6 +32,12 @@
       <_ProjectReferencesWithVersions Condition="'%(Filename)' == 'Sdcb.SimdPaddleOCR.Models.ChineseV6Medium'">
         <ProjectVersion>$(SdcbSimdPaddleOCRModelsChineseV6MediumVersion)</ProjectVersion>
       </_ProjectReferencesWithVersions>
+      <_ProjectReferencesWithVersions Condition="'%(Filename)' == 'Sdcb.SimdPaddleOCR.Models.SealV4Mobile'">
+        <ProjectVersion>$(SdcbSimdPaddleOCRModelsSealV4MobileVersion)</ProjectVersion>
+      </_ProjectReferencesWithVersions>
+      <_ProjectReferencesWithVersions Condition="'%(Filename)' == 'Sdcb.SimdPaddleOCR.Models.SealV4Server'">
+        <ProjectVersion>$(SdcbSimdPaddleOCRModelsSealV4ServerVersion)</ProjectVersion>
+      </_ProjectReferencesWithVersions>
     </ItemGroup>
   </Target>
 </Project>

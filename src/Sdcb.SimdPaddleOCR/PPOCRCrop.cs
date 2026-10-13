@@ -290,6 +290,76 @@ internal static class PPOCRCrop
             throw new InvalidDataException("Invalid perspective transform.");
     }
 
+    /// <summary>
+    /// Perspective-samples <paramref name="destination"/> at an explicit size.
+    /// Point order matches <see cref="ExtractInto"/>: top-left, top-right,
+    /// bottom-right, bottom-left. Returns false when the quad is degenerate.
+    /// </summary>
+    internal static bool TryWarpQuad(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
+        int sourceStride, float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+        Span<byte> destination, int destWidth, int destHeight, ImagePixelFormat format)
+    {
+        if (destWidth < 1 || destHeight < 1) return false;
+        if (destination.Length < checked(destWidth * (long)destHeight * 3)) return false;
+        Span<Point> points = stackalloc Point[4];
+        points[0] = new(x0, y0);
+        points[1] = new(x1, y1);
+        points[2] = new(x2, y2);
+        points[3] = new(x3, y3);
+        if (!TryHomography(points, out double a, out double b, out double c, out double d,
+                out double e, out double f, out double g, out double h))
+            return false;
+        Warp.PixelAccess access = Warp.PixelAccess.Of(format);
+        unsafe
+        {
+            fixed (byte* sourcePtr = source)
+            fixed (byte* destPtr = destination)
+            {
+                for (int y = 0; y < destHeight; y++)
+                {
+                    double v = (double)y / destHeight;
+                    int x = 0;
+                    Warp.MapRow(sourcePtr, sourceWidth, sourceHeight, sourceStride, destPtr, destWidth,
+                        destWidth, destHeight, false, a, b, c, d, e, f, g, h, y, v, ref x, access);
+                    for (; x < destWidth; x++)
+                        Warp.ProcessPixel(sourcePtr, sourceWidth, sourceHeight, sourceStride, destPtr,
+                            destWidth, destWidth, destHeight, false, a, b, c, d, e, f, g, h, x, y, v, access);
+                }
+            }
+        }
+        return true;
+    }
+
+    private static bool TryHomography(ReadOnlySpan<Point> points, out double a, out double b, out double c,
+        out double d, out double e, out double f, out double g, out double h)
+    {
+        a = b = c = d = e = f = g = h = 0;
+        double dx1 = points[1].X - points[2].X;
+        double dx2 = points[3].X - points[2].X;
+        double dx3 = points[0].X - points[1].X + points[2].X - points[3].X;
+        double dy1 = points[1].Y - points[2].Y;
+        double dy2 = points[3].Y - points[2].Y;
+        double dy3 = points[0].Y - points[1].Y + points[2].Y - points[3].Y;
+        if (Math.Abs(dx3) > PerspectiveEpsilon || Math.Abs(dy3) > PerspectiveEpsilon)
+        {
+            double denominator = dx1 * dy2 - dx2 * dy1;
+            if (!MathCompat.IsFinite(denominator) || Math.Abs(denominator) <= PerspectiveEpsilon)
+                return false;
+            g = (dx3 * dy2 - dx2 * dy3) / denominator;
+            h = (dx1 * dy3 - dx3 * dy1) / denominator;
+            if (!MathCompat.IsFinite(g) || !MathCompat.IsFinite(h))
+                return false;
+        }
+        a = points[1].X - points[0].X + g * points[1].X;
+        b = points[3].X - points[0].X + h * points[3].X;
+        c = points[0].X;
+        d = points[1].Y - points[0].Y + g * points[1].Y;
+        e = points[3].Y - points[0].Y + h * points[3].Y;
+        f = points[0].Y;
+        return MathCompat.IsFinite(a) && MathCompat.IsFinite(b) && MathCompat.IsFinite(c)
+            && MathCompat.IsFinite(d) && MathCompat.IsFinite(e) && MathCompat.IsFinite(f);
+    }
+
     private static double Distance(Point a, Point b) => Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
 
     private static void ValidateSource(ReadOnlySpan<byte> source, int width, int height, int stride,

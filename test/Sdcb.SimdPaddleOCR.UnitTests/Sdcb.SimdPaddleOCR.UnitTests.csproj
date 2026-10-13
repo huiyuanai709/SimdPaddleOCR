@@ -21,6 +21,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseNs20Library)' == 'true'">
     <!-- SetTargetFramework does not flow ns2.0 PackageReferences into the net11 host deps.json. -->
@@ -32,6 +33,11 @@
     </ProjectReference>
     <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.TextLineOrientation\Sdcb.SimdPaddleOCR.Models.TextLineOrientation.csproj" />
     <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny\Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.csproj" />
+    <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.SealV4Mobile\Sdcb.SimdPaddleOCR.Models.SealV4Mobile.csproj" />
+    <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.SealV4Server\Sdcb.SimdPaddleOCR.Models.SealV4Server.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="assets\seal.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

@@ -15,6 +15,8 @@
     <Project Path="src/models/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium/Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.csproj" />
     <Project Path="src/models/Sdcb.SimdPaddleOCR.Models.ChineseV6Small/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.csproj" />
     <Project Path="src/models/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.csproj" />
+    <Project Path="src/models/Sdcb.SimdPaddleOCR.Models.SealV4Mobile/Sdcb.SimdPaddleOCR.Models.SealV4Mobile.csproj" />
+    <Project Path="src/models/Sdcb.SimdPaddleOCR.Models.SealV4Server/Sdcb.SimdPaddleOCR.Models.SealV4Server.csproj" />
     <Project Path="src/models/Sdcb.SimdPaddleOCR.Models.TextLineOrientation/Sdcb.SimdPaddleOCR.Models.TextLineOrientation.csproj" />
   </Folder>
   <Folder Name="/build/">
