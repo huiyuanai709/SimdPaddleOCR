@@ -69,7 +69,7 @@ internal static unsafe partial class Nhwc
                 residual, activation, alpha, beta, threads);
         else
 #endif
-        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4 && (outputChannels & 15) == 0)
             PointwiseVec(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
                 residual, activation, alpha, beta, threads);
         else
@@ -102,7 +102,7 @@ internal static unsafe partial class Nhwc
                 residual, activation, alpha, beta, threads);
         else
 #endif
-        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
+        if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4 && (outputChannels & 15) == 0)
             DenseVec(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
                 outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
                 residual, activation, alpha, beta, threads);
