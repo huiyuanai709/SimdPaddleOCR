@@ -51,3 +51,4 @@ node test/Sdcb.SimdPaddleOCR.WasmBench/server.mjs --workers 4 --model tiny --cou
 | `--count` | int | `0` | Number of dataset images to run (`0` = run all available). |
 | `--out` | string | `bench-out/wasm-{model}-{workers}w.json` | Output JSON result path. |
 | `--open` | switch | `false` | Open in visible browser window instead of headless mode. |
+| `--env` | `KEY=VALUE` | — | Repeatable. Environment variable for the .NET runtime, e.g. `--env PPOCR_DET_THREADS=4` (detector intra-op threads). `run.ps1` takes `-Env A=1,B=2`. |

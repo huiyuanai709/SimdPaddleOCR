@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.Wasm;
 using System.Runtime.Intrinsics.X86;
 #endif
 
@@ -23,9 +24,9 @@ internal enum NhwcActivation
 /// Channels-last (NHWC) kernels used when <see cref="OnnxSharp.LayoutPlanner"/>
 /// runs a segment of the graph channels-last. All entry points take logical
 /// NCHW dimensions; the data is stored as [n][h][w][c]. Each entry dispatches
-/// with <c>Avx512F.IsSupported</c> / AVX2+FMA / AdvSIMD / <see cref="Vector{T}"/>
-/// widths 4/8 / scalar, same as the NCHW kernels. The Vector files compile on
-/// both TFMs; ns2 cannot name the Avx / AdvSIMD methods.
+/// with <c>Avx512F.IsSupported</c> / AVX2+FMA / AdvSIMD / WASM PackedSimd /
+/// <see cref="Vector{T}"/> widths 4/8 / scalar. The Vector files compile on
+/// both TFMs; ns2 cannot name the Avx / AdvSIMD / PackedSimd methods.
 /// </summary>
 internal static unsafe partial class Nhwc
 {
@@ -67,6 +68,9 @@ internal static unsafe partial class Nhwc
         else if (AdvSimd.Arm64.IsSupported)
             PointwiseAdvSimd(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
                 residual, activation, alpha, beta, threads);
+        else if (PackedSimd.IsSupported)
+            PointwisePackedSimd(input, packedWeights, bias, output, pixels, inputChannels, outputChannels,
+                residual, activation, alpha, beta, threads);
         else
 #endif
         if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4 && (outputChannels & 15) == 0)
@@ -100,6 +104,10 @@ internal static unsafe partial class Nhwc
             DenseAdvSimd(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
                 outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
                 residual, activation, alpha, beta, threads);
+        else if (PackedSimd.IsSupported)
+            DensePackedSimd(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels,
+                outputHeight, outputWidth, kernelH, kernelW, strideH, strideW, padTop, padLeft,
+                residual, activation, alpha, beta, threads);
         else
 #endif
         if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4 && (outputChannels & 15) == 0)
@@ -131,6 +139,9 @@ internal static unsafe partial class Nhwc
         else if (AdvSimd.Arm64.IsSupported)
             DepthwiseAdvSimd(input, packedWeights, bias, output, batch, channels, height, width, outputHeight, outputWidth,
                 kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
+        else if (PackedSimd.IsSupported)
+            DepthwisePackedSimd(input, packedWeights, bias, output, batch, channels, height, width, outputHeight, outputWidth,
+                kernelH, kernelW, strideH, strideW, padTop, padLeft, residual, activation, alpha, beta, threads);
         else
 #endif
         if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)
@@ -157,6 +168,8 @@ internal static unsafe partial class Nhwc
             ConvTranspose2x2Stride2Avx(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
         else if (AdvSimd.Arm64.IsSupported)
             ConvTranspose2x2Stride2AdvSimd(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
+        else if (PackedSimd.IsSupported)
+            ConvTranspose2x2Stride2PackedSimd(input, packedWeights, bias, output, batch, inputChannels, height, width, outputChannels, activation, threads);
         else
 #endif
         if (Vector.IsHardwareAccelerated && Vector<float>.Count is 8 or 4)

@@ -340,7 +340,7 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 | Intel UHD 770 核显        | Vulkan（无协作矩阵） | 慢于 CPU，`Auto` 默认走 CPU |
 
 CPU 路径在 2.0 也普遍再快 **4–15%**（CTC ArgMax 并行化、动态 intra-op 线程预算、DET 后处理重写；ARM64 另有手写 AdvSIMD MatMul）。
-WebAssembly（`browser-wasm` 多线程 + LLVM AOT）下 tiny 中位 **103 ms/张**，约为同机桌面原生的 2.3 倍。
+WebAssembly（`browser-wasm` 多线程 + LLVM AOT + WASM SIMD128 `PackedSimd` 内核）下 tiny 中位 **113 ms/张**（Ryzen 7 5800X），约为同机桌面原生的 2.5 倍。
 
 每台设备的完整跑分、精度表和复现命令见 [`docs/perf.md`](docs/perf.md) 与 `docs/` 下各机型报告（`vulkan-*.md`、`metal-m4.md`、`wasm.md`）。
 
@@ -362,6 +362,6 @@ WebAssembly（`browser-wasm` 多线程 + LLVM AOT）下 tiny 中位 **103 ms/张
 
 ## 微信群
 
-![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1011)
+![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1012)
 
 如果微信群二维码过期了，请加入 QQ 群 [C#/.NET计算机视觉技术交流 579060605](https://qm.qq.com/q/bPw5jAK4qk)。

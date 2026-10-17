@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.Wasm;
 using System.Runtime.Intrinsics.X86;
 #endif
 
@@ -105,6 +106,11 @@ internal static partial class SimdKernels
         {
             Vector128<float> packed = Unsafe.BitCast<Vector<float>, Vector128<float>>(value);
             return Unsafe.BitCast<Vector128<float>, Vector<float>>(ErfVectorSse(packed));
+        }
+        else if (PackedSimd.IsSupported && Vector<float>.Count == 4)
+        {
+            Vector128<float> packed = Unsafe.BitCast<Vector<float>, Vector128<float>>(value);
+            return Unsafe.BitCast<Vector128<float>, Vector<float>>(ErfVectorPackedSimd(packed));
         }
         else
 #endif

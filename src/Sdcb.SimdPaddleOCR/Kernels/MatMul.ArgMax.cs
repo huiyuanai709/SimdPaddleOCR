@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.Wasm;
 using System.Runtime.Intrinsics.X86;
 #endif
 using System.Threading.Tasks;
@@ -45,6 +46,12 @@ internal static partial class MatMul
         else if (packedWeights is not null && AdvSimd.Arm64.IsSupported)
         {
             MatMulArgMaxPackedAdvSimd(input, weights, packedWeights, bias,
+                indices, scores, batch, rows, inner, columns, threads);
+            return true;
+        }
+        else if (packedWeights is not null && PackedSimd.IsSupported && Vector<float>.Count == 4)
+        {
+            MatMulArgMaxPackedPackedSimd(input, weights, packedWeights, bias,
                 indices, scores, batch, rows, inner, columns, threads);
             return true;
         }

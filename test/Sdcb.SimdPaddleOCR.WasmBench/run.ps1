@@ -6,7 +6,9 @@ param(
     [string]$Out = "",
     [switch]$Open,
     [switch]$NoBuild,
-    [switch]$NoAot
+    [switch]$NoAot,
+    # Runtime environment variables, e.g. -Env PPOCR_DET_THREADS=4,PPOCR_NHWC=0
+    [string[]]$Env = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +37,9 @@ if ($Out -ne "") {
 }
 if ($Open) {
     $NodeArgs += @("--open")
+}
+foreach ($pair in $Env) {
+    $NodeArgs += @("--env", $pair)
 }
 
 Write-Host "[WasmBench] Launching benchmark harness..." -ForegroundColor Cyan

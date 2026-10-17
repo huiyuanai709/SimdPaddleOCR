@@ -16,7 +16,7 @@ internal static class LayoutPlanner
     public const ushort ToNhwc = 1, ToNchw = 2;
 
     /// <summary>
-    /// On for every ISA that has an NHWC tile (AVX-512, AVX2+FMA, AdvSIMD,
+    /// On for every ISA that has an NHWC tile (AVX-512, AVX2+FMA, AdvSIMD, PackedSimd,
     /// Vector widths 4/8, scalar). Off only when <c>PPOCR_NHWC=0</c>.
     /// </summary>
     public static bool IsEnabled { get; } =

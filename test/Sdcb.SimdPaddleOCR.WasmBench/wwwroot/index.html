@@ -324,11 +324,18 @@
 
             try {
                 log("[BENCH] Initializing .NET 10 WebAssembly Web Workers...");
-                const { runMain } = await dotnet
+                let builder = dotnet
                     .withDiagnosticTracing(false)
                     .withConsoleForwarding()
-                    .withApplicationArguments(...cliArgs)
-                    .create();
+                    .withApplicationArguments(...cliArgs);
+                // ?env=KEY=VALUE (repeatable), e.g. PPOCR_DET_THREADS=4.
+                for (const pair of params.getAll('env')) {
+                    const eq = pair.indexOf('=');
+                    if (eq <= 0) continue;
+                    builder = builder.withEnvironmentVariable(pair.substring(0, eq), pair.substring(eq + 1));
+                    log(`[BENCH] env ${pair}`, "log-dim");
+                }
+                const { runMain } = await builder.create();
 
                 log("[BENCH] Starting benchmark execution...");
                 const exitCode = await runMain();

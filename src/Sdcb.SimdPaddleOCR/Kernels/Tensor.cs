@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 #if !NETSTANDARD2_0
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.Wasm;
 using System.Runtime.Intrinsics.X86;
 #endif
 
@@ -556,6 +557,14 @@ internal static partial class SimdKernels
                         ErfVectorAdvSimd(AdvSimd.Multiply(value, SseInvSqrtTwo)), SseOne);
                     AdvSimd.Multiply(AdvSimd.Multiply(value, activated), SseHalf).Store(outputPtr + i);
                 }
+            }
+        }
+        else if (PackedSimd.IsSupported)
+        {
+            fixed (float* inputPtr = input, outputPtr = output)
+            {
+                for (; i <= input.Length - 4; i += 4)
+                    PackedSimd.Store(outputPtr + i, GeluVectorPackedSimd(PackedSimd.LoadVector128(inputPtr + i)));
             }
         }
         else

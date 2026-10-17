@@ -22,6 +22,8 @@ const out = getArg('--out', `bench-out/wasm-${model}-${workers}w.json`);
 const port = parseInt(getArg('--port', '0'), 10);
 const isHeadless = !argv.includes('--open');
 const noLaunch = argv.includes('--no-launch');
+// --env KEY=VALUE (repeatable): environment variables for the .NET runtime.
+const envPairs = argv.flatMap((a, i) => a === '--env' && i + 1 < argv.length ? [argv[i + 1]] : []);
 
 const mimeTypes = {
     '.html': 'text/html',
@@ -150,6 +152,7 @@ server.listen(port, '127.0.0.1', () => {
         out,
         autorun: '1'
     });
+    for (const pair of envPairs) queryParams.append('env', pair);
     const targetUrl = `http://127.0.0.1:${assignedPort}/index.html?${queryParams.toString()}`;
 
     console.log(`[SERVER] WasmBench server running at http://127.0.0.1:${assignedPort}/`);
