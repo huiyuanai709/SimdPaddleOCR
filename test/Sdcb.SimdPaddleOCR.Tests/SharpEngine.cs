@@ -12,8 +12,8 @@ sealed class SharpEngine : IBenchEngine
     private readonly int _workers;
     private readonly bool _useCls;
     private (double Milliseconds, long Calls)[] _prevStages;
-    private (long Ticks, long Calls)[] _prevOp;
-    private (long Ticks, long Calls)[] _prevConv;
+    private Dictionary<string, (double Ms, long Calls)> _prevOp;
+    private Dictionary<string, (double Ms, long Calls)> _prevConv;
     private readonly OcrBackend _backend;
 
     public SharpEngine(string modelType, int workers, OcrBackend backend, bool useCls = true, int detSide = 0)
@@ -42,7 +42,7 @@ sealed class SharpEngine : IBenchEngine
             : new PaddleOcrAll(PaddleOcrModelSet.Load(bundle.Detection.OpenRead(), null,
                 bundle.Recognition.OpenRead(), bundle.Dictionary.OpenRead()), options);
         PipelineProfiler.Enable(true);
-        InferenceSession.EnableProfiling(true);
+        EngineStats.EnableProfiling(true);
         Extra["cacheEntries"] = CacheEntries;
         Extra["backend"] = backend.ToString().ToLowerInvariant();
         Extra["effectiveWorkers"] = _ocr.EffectiveLineWorkerCount;
@@ -51,8 +51,8 @@ sealed class SharpEngine : IBenchEngine
         _workers = workers;
         _useCls = useCls;
         _prevStages = PipelineProfiler.Snapshot();
-        _prevOp = InferenceSession.ProfileSnapshot();
-        _prevConv = InferenceSession.ConvClassProfileSnapshot();
+        _prevOp = EngineStats.Operators();
+        _prevConv = EngineStats.ConvClasses();
     }
 
     public string Name => "sharp";
@@ -64,8 +64,8 @@ sealed class SharpEngine : IBenchEngine
     {
         PaddleOcrResult result = _ocr.Run(bgr, width, height, stride);
         var cur = PipelineProfiler.Snapshot();
-        var curOp = InferenceSession.ProfileSnapshot();
-        var curConv = InferenceSession.ConvClassProfileSnapshot();
+        var curOp = EngineStats.Operators();
+        var curConv = EngineStats.ConvClasses();
         var stageMs = new Dictionary<string, double>();
         var stageCalls = new Dictionary<string, long>();
         for (int s = 0; s < PipelineProfiler.StageCount; s++)
@@ -73,24 +73,8 @@ sealed class SharpEngine : IBenchEngine
             stageMs[PipelineProfiler.StageNames[s]] = cur[s].Milliseconds - _prevStages[s].Milliseconds;
             stageCalls[PipelineProfiler.StageNames[s]] = cur[s].Calls - _prevStages[s].Calls;
         }
-        var ops = new Dictionary<string, BenchmarkMetric>();
-        string[] opNames = Enum.GetNames<OperatorId>();
-        for (int op = 1; op < opNames.Length; op++)
-        {
-            double ms = (curOp[op].Ticks - _prevOp[op].Ticks) * 1000.0 / Stopwatch.Frequency;
-            long calls = curOp[op].Calls - _prevOp[op].Calls;
-            if (calls > 0)
-                ops[opNames[op]] = new BenchmarkMetric { Ms = ms, Calls = calls };
-        }
-        var conv = new Dictionary<string, BenchmarkMetric>();
-        string[] convNames = ["Conv1x1", "Conv3x3", "Depthwise3x3", "Stride2Conv3x3", "OtherConv"];
-        for (int c = 0; c < 5; c++)
-        {
-            double ms = (curConv[c].Ticks - _prevConv[c].Ticks) * 1000.0 / Stopwatch.Frequency;
-            long calls = curConv[c].Calls - _prevConv[c].Calls;
-            if (calls > 0)
-                conv[convNames[c]] = new BenchmarkMetric { Ms = ms, Calls = calls };
-        }
+        var ops = Delta(curOp, _prevOp);
+        var conv = Delta(curConv, _prevConv);
         _prevStages = cur;
         _prevOp = curOp;
         _prevConv = curConv;
@@ -110,4 +94,16 @@ sealed class SharpEngine : IBenchEngine
     }
 
     public void Dispose() => _ocr.Dispose();
+
+    private static Dictionary<string, BenchmarkMetric> Delta(Dictionary<string, (double Ms, long Calls)> cur,
+        Dictionary<string, (double Ms, long Calls)> prev)
+    {
+        var d = new Dictionary<string, BenchmarkMetric>();
+        foreach (var (name, (ms, calls)) in cur)
+        {
+            prev.TryGetValue(name, out var p);
+            if (calls > p.Calls) d[name] = new BenchmarkMetric { Ms = ms - p.Ms, Calls = calls - p.Calls };
+        }
+        return d;
+    }
 }

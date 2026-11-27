@@ -17,8 +17,8 @@ using Sdcb.SimdPaddleOCR.Models.ChineseV6Medium;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Small;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
 using Sdcb.SimdPaddleOCR.OnnxSharp;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using Sdcb.SimdCodecs;
+using Sdcb.SimdCodecs.Abstractions;
 
 namespace Sdcb.SimdPaddleOCR.WasmBench;
 
@@ -101,7 +101,6 @@ public static class Program
         Console.WriteLine($"[WASM] Model loaded in {sw.ElapsedMilliseconds} ms. Effective LineWorkers: {ocr.EffectiveLineWorkerCount}");
 
         PipelineProfiler.Enable(true);
-        InferenceSession.EnableProfiling(true);
 
         using HttpClient httpClient = new HttpClient();
         if (!string.IsNullOrEmpty(baseUrl))
@@ -152,8 +151,6 @@ public static class Program
 
         List<BenchmarkRow> rows = new List<BenchmarkRow>();
         var prevStages = PipelineProfiler.Snapshot();
-        var prevOp = InferenceSession.ProfileSnapshot();
-        var prevConv = InferenceSession.ConvClassProfileSnapshot();
 
         for (int i = 0; i < files.Length; i++)
         {
@@ -173,29 +170,16 @@ public static class Program
                 imageBytes = await httpClient.GetByteArrayAsync("/dataset/" + file);
             }
 
-            using Image<Rgb24> image = Image.Load<Rgb24>(imageBytes);
-            byte[] pixels = new byte[checked(image.Width * image.Height * 3)];
-            for (int y = 0; y < image.Height; y++)
-            {
-                for (int x = 0; x < image.Width; x++)
-                {
-                    Rgb24 p = image[x, y];
-                    int o = (y * image.Width + x) * 3;
-                    pixels[o] = p.B;
-                    pixels[o + 1] = p.G;
-                    pixels[o + 2] = p.R;
-                }
-            }
+            // Packed BGR24 (Stride = Width * 3); EXIF orientation is left as stored.
+            using PixelBuffer image = ImageCodecs.Decode(imageBytes, PixelFormat.Bgr24);
 
             bool isWarmup = i < warmupCount && files.Length > 1;
 
             sw.Restart();
-            PaddleOcrResult result = ocr.Run(pixels, image.Width, image.Height, image.Width * 3);
+            PaddleOcrResult result = ocr.Run(image.Pixels, image.Width, image.Height, image.Stride);
             sw.Stop();
 
             var curStages = PipelineProfiler.Snapshot();
-            var curOp = InferenceSession.ProfileSnapshot();
-            var curConv = InferenceSession.ConvClassProfileSnapshot();
 
             var stageMs = new Dictionary<string, double>();
             var stageCalls = new Dictionary<string, long>();
@@ -206,28 +190,9 @@ public static class Program
             }
 
             var ops = new Dictionary<string, BenchmarkMetric>();
-            string[] opNames = Enum.GetNames<OperatorId>();
-            for (int op = 1; op < opNames.Length; op++)
-            {
-                double ms = (curOp[op].Ticks - prevOp[op].Ticks) * 1000.0 / Stopwatch.Frequency;
-                long calls = curOp[op].Calls - prevOp[op].Calls;
-                if (calls > 0)
-                    ops[opNames[op]] = new BenchmarkMetric { Ms = ms, Calls = calls };
-            }
-
             var conv = new Dictionary<string, BenchmarkMetric>();
-            string[] convNames = ["Conv1x1", "Conv3x3", "Depthwise3x3", "Stride2Conv3x3", "OtherConv"];
-            for (int c = 0; c < 5; c++)
-            {
-                double ms = (curConv[c].Ticks - prevConv[c].Ticks) * 1000.0 / Stopwatch.Frequency;
-                long calls = curConv[c].Calls - prevConv[c].Calls;
-                if (calls > 0)
-                    conv[convNames[c]] = new BenchmarkMetric { Ms = ms, Calls = calls };
-            }
 
             prevStages = curStages;
-            prevOp = curOp;
-            prevConv = curConv;
 
             BenchmarkRow row = new BenchmarkRow
             {

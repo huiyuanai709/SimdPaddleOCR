@@ -1,5 +1,6 @@
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using Sdcb.SimdOnnx.Onnx;
 using Sdcb.SimdPaddleOCR.ModelProvider;
 using Sdcb.SimdPaddleOCR.OnnxSharp;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
@@ -93,12 +94,23 @@ public class SealTextTests
     }
 
     [Fact]
+    public void ServerSeal_Float16WeightsLoadAsFloat32()
+    {
+        using Stream server = SealV4ServerModel.Detection.OpenRead();
+        Model model = Model.Load(server);
+        Assert.Contains(model.Onnx.Nodes, node => node.OpType == "Conv");
+        OnnxTensorData weight = Assert.Single(model.Onnx.Initializers.Values, tensor => tensor.Name == "conv2d_10.w_0");
+        Assert.Equal(OnnxTensorData.TypeFloat, weight.DataType);
+        Assert.Equal(131072 / 2, weight.AsFloats().Length);
+    }
+
+    [Fact]
     public void Float16Bits_RoundTripCommonValues()
     {
-        Assert.Equal(0f, Model.SingleFromFloat16Bits(0));
-        Assert.Equal(1f, Model.SingleFromFloat16Bits(0x3C00));
-        Assert.Equal(-2f, Model.SingleFromFloat16Bits(0xC000));
-        Assert.Equal(0.5f, Model.SingleFromFloat16Bits(0x3800));
+        Assert.Equal(0f, Float16Onnx.SingleFromFloat16Bits(0));
+        Assert.Equal(1f, Float16Onnx.SingleFromFloat16Bits(0x3C00));
+        Assert.Equal(-2f, Float16Onnx.SingleFromFloat16Bits(0xC000));
+        Assert.Equal(0.5f, Float16Onnx.SingleFromFloat16Bits(0x3800));
     }
 
     [Fact]

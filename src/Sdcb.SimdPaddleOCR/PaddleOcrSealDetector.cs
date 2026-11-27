@@ -96,7 +96,7 @@ public sealed class PaddleOcrSealDetector : IDisposable
             try
             {
                 PPOCRPreprocess.Det(source, sourceWidth, sourceHeight, sourceStride,
-                    size.Width, size.Height, inputSpan, session.ResizeWorkspace, _intraOpThreads,
+                    size.Width, size.Height, inputSpan, _intraOpThreads,
                     session.InputIsNhwc, format);
                 ReadOnlySpan<float> probabilities = session.RunInternal(inputSpan);
                 if (probabilities.Length != checked(size.Width * size.Height))

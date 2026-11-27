@@ -137,7 +137,7 @@ public sealed class PaddleOcrSealAll : IDisposable
         if (options.DetIntraOpThreads > 0) return Math.Min(options.DetIntraOpThreads, 16);
         if (int.TryParse(Environment.GetEnvironmentVariable("PPOCR_DET_THREADS"), out int env) && env > 0)
             return Math.Min(env, 16);
-        if (OnnxSharp.LayoutPlanner.IsEnabled) return Math.Min(16, Environment.ProcessorCount);
+        if (OnnxSharp.CompiledModel.Options.Nhwc) return Math.Min(16, Environment.ProcessorCount);
         return Math.Min(8, Environment.ProcessorCount);
     }
 

@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Runtime.Intrinsics.X86;
+using Sdcb.SimdOnnx.Engine;
 using Sdcb.SimdPaddleOCR;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
 using Sdcb.SimdPaddleOCR.OnnxSharp;
@@ -56,7 +56,7 @@ static class PageProfile
         byte[] pixels = RenderPage(width, height, format);
         Console.WriteLine(
             $"page={width}x{height} format={formatName} bytes={pixels.Length} " +
-            $"cpu={Environment.ProcessorCount} avx2={Avx2.IsSupported} avx512={Avx512F.IsSupported} " +
+            $"cpu={Environment.ProcessorCount} avx2={Isa("X86.Avx2")} avx512={Isa("X86.Avx512F")} " +
             $"engines={engines} lineWorkers={lineWorkers} detThreads={detThreads} recBatch={recBatch} recIntra={recIntra}");
 
         PaddleOcrOptions options = new()
@@ -84,7 +84,8 @@ static class PageProfile
                 pool[i] = new PaddleOcrAll(det, null, rec, dict, options);
 
             PipelineProfiler.Enable(true);
-            InferenceSession.EnableProfiling(true);
+            EngineProfiler.Enabled = true;
+            EngineProfiler.Reset();
             string? text = null;
             int lines = 0;
             for (int i = 0; i < warmup; i++)
@@ -94,7 +95,8 @@ static class PageProfile
                 lines = warm.Lines.Length;
             }
             PipelineProfiler.Enable(true);
-            InferenceSession.EnableProfiling(true);
+            EngineProfiler.Enabled = true;
+            EngineProfiler.Reset();
             long allocBefore = GC.GetTotalAllocatedBytes(precise: true);
             int gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2);
             var samples = new double[repeats];
@@ -137,15 +139,13 @@ static class PageProfile
                 Console.WriteLine(
                     $"  {PipelineProfiler.StageNames[s],-16} {stages[s].Milliseconds / pages,8:F2} ms   calls/page={stages[s].Calls / pages:F1}");
             }
-            var ops = InferenceSession.ProfileSnapshot();
-            string[] opNames = Enum.GetNames<OperatorId>();
+            var ops = EngineProfiler.Operators();
             Console.WriteLine("operators (ms/page, calls>0):");
             var ranked = new List<(string Name, double Ms, long Calls)>();
-            for (int op = 1; op < opNames.Length; op++)
+            foreach (var kv in ops)
             {
-                if (ops[op].Calls == 0) continue;
-                double ms = ops[op].Ticks * 1000.0 / Stopwatch.Frequency / pages;
-                ranked.Add((opNames[op], ms, ops[op].Calls));
+                if (kv.Value.Calls == 0) continue;
+                ranked.Add((kv.Key, kv.Value.Ms / pages, kv.Value.Calls));
             }
             foreach (var row in ranked.OrderByDescending(x => x.Ms).Take(12))
                 Console.WriteLine($"  {row.Name,-16} {row.Ms,8:F2} ms   calls/page={row.Calls / pages:F1}");
@@ -162,6 +162,12 @@ static class PageProfile
             rec.Dispose();
         }
     }
+
+    // Same reason as Program.IsaSupported: the ns2.0 library exposes the engine's
+    // internal IsSupported stubs through InternalsVisibleTo.
+    private static bool Isa(string name) =>
+        typeof(object).Assembly.GetType("System.Runtime.Intrinsics." + name)
+            ?.GetProperty("IsSupported")?.GetValue(null) is true;
 
     private static byte[] ReadAll(Stream source)
     {

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableSdkContainerSupport>true</EnableSdkContainerSupport>
+    <ContainerRepository>sdcb/simdpaddleocr</ContainerRepository>
+    <ContainerFamily>noble-chiseled</ContainerFamily>
+    <RuntimeIdentifiers Condition="'$(PublishMultiArchContainer)' == 'true'">linux-x64;linux-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+  <ItemGroup>
+    <ContainerLabel Include="org.opencontainers.image.title" Value="Sdcb.SimdPaddleOCR" />
+    <ContainerLabel Include="org.opencontainers.image.description" Value="Pure C# PP-OCRv6 HTTP API and Web UI powered by Sdcb.SimdPaddleOCR and Sdcb.SimdCodecs" />
+    <ContainerLabel Include="org.opencontainers.image.source" Value="https://github.com/sdcb/SimdPaddleOCR" />
+    <ContainerLabel Include="org.opencontainers.image.licenses" Value="Apache-2.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sdcb.SimdPaddleOCR\Sdcb.SimdPaddleOCR.csproj" />
+    <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny\Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.csproj" />
+    <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Small\Sdcb.SimdPaddleOCR.Models.ChineseV6Small.csproj" />
+    <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Medium\Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.csproj" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.16.18" />
+    <PackageReference Include="Sdcb.SimdCodecs" Version="2.1.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\sample.jpg"
+             Link="wwwroot\sample.jpg"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

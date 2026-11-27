@@ -22,11 +22,10 @@ public static class OcrMetal
 #if NETSTANDARD2_0
         return null;
 #else
-        Backends.Metal.MtlDevice? dev = Backends.Metal.MetalBackend.TryGetDevice();
-        if (dev is null)
+        if (!Sdcb.SimdOnnx.Backends.Metal.MetalBackend.TryGetDefault(out Sdcb.SimdOnnx.Backends.Metal.MetalBackend? backend))
             return null;
-        ulong workingSet = dev.RecommendedMaxWorkingSetSize;
-        return new MetalDeviceInfo(dev.Name, workingSet, OcrVulkan.BufferByteCap(workingSet));
+        ulong workingSet = backend.Dev.RecommendedMaxWorkingSetSize;
+        return new MetalDeviceInfo(backend.DeviceName, workingSet, OcrVulkan.BufferByteCap(workingSet));
 #endif
     }
 
