@@ -43,7 +43,7 @@ public sealed class PaddleOcrDetector : IDisposable
             if (_options.MaxPooledSessions < 0) throw new ArgumentOutOfRangeException(nameof(options));
             _intraOpThreads = MathCompat.Clamp(intraOpThreads, 1, 16);
             // One shape-agnostic compiled model; pooled sessions are reshaped per image.
-            _compiled = new CompiledModel(_model, _intraOpThreads);
+            _compiled = new CompiledModel(_model, _intraOpThreads, releaseInput: true);
             if (_options.LimitSideLength is < 32 or > 4096) throw new ArgumentOutOfRangeException(nameof(options));
             _postprocessPixels = checked(_options.LimitSideLength * _options.LimitSideLength);
             if (_options.MaxCandidates is <= 0 or > 10_000) throw new ArgumentOutOfRangeException(nameof(options));
@@ -89,11 +89,11 @@ public sealed class PaddleOcrDetector : IDisposable
 
     private static bool IsTinyDetector(Model model)
     {
-        foreach (NodeRecord node in model.Nodes)
+        foreach (var node in model.Onnx.Nodes)
         {
-            if (node.Operator != OperatorId.Conv || node.Outputs.Length == 0) continue;
-            IReadOnlyList<int> shape = model.GetTensorShape(node.Outputs[0]);
-            return shape.Count >= 2 && shape[1] <= 16;
+            if (node.OpType != "Conv" || node.Inputs.Count < 2) continue;
+            return model.Onnx.TryGetInitializerShape(node.Inputs[1], out int[]? w)
+                && w.Length >= 1 && w[0] <= 16;
         }
         return false;
     }
@@ -141,7 +141,7 @@ public sealed class PaddleOcrDetector : IDisposable
                 long started = s_profileEnabled ? Stopwatch.GetTimestamp() : 0;
                 long pipelineStarted = pipelineProfile ? PipelineProfiler.Now() : 0;
                 PPOCRPreprocess.Det(source, sourceWidth, sourceHeight, sourceStride,
-                    size.Width, size.Height, inputSpan, session.ResizeWorkspace, _intraOpThreads,
+                    size.Width, size.Height, inputSpan, _intraOpThreads,
                     session.InputIsNhwc, format);
                 if (s_profileEnabled) AddProfile(0, started);
                 if (pipelineProfile) PipelineProfiler.Add(PipelineProfiler.DetPreprocess, pipelineStarted);

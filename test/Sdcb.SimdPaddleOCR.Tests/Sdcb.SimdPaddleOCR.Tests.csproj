@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net11.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>preview</LangVersion>
@@ -20,13 +20,14 @@
     <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny\Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.csproj" />
     <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Small\Sdcb.SimdPaddleOCR.Models.ChineseV6Small.csproj" />
     <ProjectReference Include="..\..\src\models\Sdcb.SimdPaddleOCR.Models.ChineseV6Medium\Sdcb.SimdPaddleOCR.Models.ChineseV6Medium.csproj" />
+    <PackageReference Include="Sdcb.SimdCodecs" Version="2.1.0" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
     <PackageReference Include="SkiaSharp" Version="4.151.1" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="4.151.1" Condition="'$(OS)' != 'Windows_NT'" />
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="4.151.1" Condition="'$(OS)' == 'Windows_NT'" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseNs20Library)' == 'true'">
-    <!-- SetTargetFramework does not flow ns2.0 PackageReferences into the net11 host deps.json. -->
+    <!-- SetTargetFramework does not flow ns2.0 PackageReferences into the net10 host deps.json. -->
     <PackageReference Include="Microsoft.Bcl.Numerics" Version="10.0.11" />
   </ItemGroup>
 </Project>

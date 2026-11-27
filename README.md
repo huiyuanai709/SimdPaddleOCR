@@ -3,10 +3,10 @@
 **中文** | [English](README_EN.md)
 
 纯 C# PP-OCRv6 推理库：多平台手写 Kernel / GEMM 等算子、超高性能、低内存需求、超高准确率。
-自带托管 ONNX 解释器，不依赖 Paddle Inference、ONNX Runtime 或 OpenCV 原生库。
+推理引擎为纯 C# 的 [SimdOnnx](https://github.com/sdcb/SimdOnnx)（与 SimdGcdrNet 共用），以源码形式（git submodule）编译进本库，类型全部 internal，不额外引入引擎包；不依赖 Paddle Inference、ONNX Runtime 或 OpenCV 原生库。
 GPU 支持 Vulkan 与 Metal（macOS），仅 .NET 10；同样纯 C#、不内嵌任何原生二进制。
 
-核心 API 接收交错像素内存（默认 BGR24，也可直接传 RGB24 / BGRA32 / RGBA32），不负责图片解码，因此不会强制引入 ImageSharp、SkiaSharp 或 OpenCvSharp。
+核心 API 接收交错像素内存（默认 BGR24，也可直接传 RGB24 / BGRA32 / RGBA32 / Gray8），不负责图片解码，因此不会强制引入 SimdCodecs、SkiaSharp 或 OpenCvSharp。
 
 ## 快速开始
 
@@ -15,46 +15,30 @@ GPU 支持 Vulkan 与 Metal（macOS），仅 .NET 10；同样纯 C#、不内嵌�
 ```powershell
 dotnet add package Sdcb.SimdPaddleOCR
 dotnet add package Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny
-dotnet add package SixLabors.ImageSharp --version 3.1.11
+dotnet add package Sdcb.SimdCodecs
 ```
 
 模型从程序集嵌入资源直接加载，不会解压或写入临时文件。`stride = 0` 表示紧密排列（`width *` 每像素字节数）。默认 `ImagePixelFormat.Bgr24`；其它布局在 resize / crop 里就地 swizzle，不会先转成一张中间 BGR 图。
 
-### ImageSharp 3（推荐）
+### SimdCodecs（推荐）
+
+纯托管图片解码（JPEG / PNG / WebP / BMP / GIF / TIFF 等），无原生依赖。需要 `Sdcb.SimdCodecs` 2.0 及以上。
 
 ```csharp
-using System.Runtime.InteropServices;
+using Sdcb.SimdCodecs;
+using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdPaddleOCR;
 using Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats;
-using SixLabors.ImageSharp.PixelFormats;
 
 using PaddleOcrAll ocr = await PaddleOcrAll.LoadAsync(ChineseV6TinyModels.Default);
-using Image<Rgba32> image = await Image.LoadAsync<Rgba32>(CreateDecoderOptions(), "sample.jpg");
-Rgba32[]? packedCopy = null;
-if (!image.DangerousTryGetSinglePixelMemory(out Memory<Rgba32> memory))
-{
-    packedCopy = new Rgba32[checked(image.Width * image.Height)];
-    image.CopyPixelDataTo(packedCopy);
-    memory = packedCopy;
-}
-
-PaddleOcrResult result = ocr.Run(MemoryMarshal.AsBytes(memory.Span), image.Width, image.Height,
-    format: ImagePixelFormat.Rgba32);
+byte[] data = await File.ReadAllBytesAsync("sample.jpg");
+// Bgr24 is the OCR default layout; ApplyOrientation makes phone photos (EXIF Orientation) upright.
+using PixelBuffer image = ImageCodecs.Decode(data, PixelFormat.Bgr24, new DecodeOptions { ApplyOrientation = true });
+PaddleOcrResult result = ocr.Run(image.Pixels, image.Width, image.Height, image.Stride);
 Console.WriteLine(result.Text);
-
-// 必须 Clone Default：直接改 Configuration.Default 会丢掉 PNG/JPEG 解码器。
-// 默认分配器按 4MB 分块，大图会让 DangerousTryGetSinglePixelMemory 失败。
-static DecoderOptions CreateDecoderOptions()
-{
-    Configuration configuration = Configuration.Default.Clone();
-    configuration.PreferContiguousImageBuffers = true;
-    return new DecoderOptions { Configuration = configuration };
-}
 ```
 
-ImageSharp 默认分配器会把像素拆成 4MB 块，大图上 `DangerousTryGetSinglePixelMemory` 会失败。用独立 `Configuration` 打开 `PreferContiguousImageBuffers` 尽量零拷贝；仍不连续再 `CopyPixelDataTo`。不要改 `Configuration.Default`。
+`ImageCodecs.Decode` 一次调用直接解码成紧密排列的 BGR24（`PixelBuffer.Stride` 即行字节数），无需额外转换或拷贝。`ApplyOrientation = true` 会按 EXIF 方向旋转像素，手机照片无需再手动处理。文件不是可解码格式时抛 `NotSupportedException`，文件损坏时抛带具体原因的 `InvalidDataException`。整段 `Run` 期间不要释放 `PixelBuffer`。
 
 后续三个示例由调用方把 lock / 原生指针包成 `ReadOnlySpan<byte>` 再交给 `Run`，加载方式与上面相同。整段 `Run` 期间不要 Unlock / Dispose 源图。
 
@@ -118,7 +102,7 @@ finally
 
 | NuGet 包                                        | 版本                                                                                                                                                                       | 说明                                                                           |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `Sdcb.SimdPaddleOCR`                            | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR)                                                       | 纯托管推理核心（`net11.0;net10.0;netstandard2.0`）                                     |
+| `Sdcb.SimdPaddleOCR`                            | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR)                                                       | 纯托管推理核心（`net10.0;netstandard2.0`）                                     |
 | `Sdcb.SimdPaddleOCR.ModelProvider`              | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.ModelProvider.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.ModelProvider)                           | 模型契约（`IPaddleOcrModelProvider` / `PaddleOcrModelBundle`），通常被传递引用 |
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny`       | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Tiny)             | PP-OCRv6 tiny DET+REC+字典；`ChineseV6TinyModels.Default` 含 CLS               |
 | `Sdcb.SimdPaddleOCR.Models.ChineseV6Small`      | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.ChineseV6Small.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.ChineseV6Small)           | PP-OCRv6 small；`ChineseV6SmallModels.Default`                                 |
@@ -127,7 +111,7 @@ finally
 | `Sdcb.SimdPaddleOCR.Models.SealV4Mobile`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.SealV4Mobile.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.SealV4Mobile)             | PP-OCRv4 mobile 印章检测；`SealV4MobileModel.Detection`（约 4.6MB）            |
 | `Sdcb.SimdPaddleOCR.Models.SealV4Server`     | [![NuGet](https://img.shields.io/nuget/v/Sdcb.SimdPaddleOCR.Models.SealV4Server.svg)](https://www.nuget.org/packages/Sdcb.SimdPaddleOCR.Models.SealV4Server)             | PP-OCRv4 server 印章检测；`SealV4ServerModel.Detection`（float16 打包，约 56MB） |
 
-每个 `IPaddleOcrModelProvider` 提供 `Name`、`Kind`、`Format`、语言和版本元数据以及 `OpenRead()` / `OpenReadAsync()`。完整 OCR 组合由 `PaddleOcrModelBundle` 表达（DET、REC、字典和可选 CLS）。当前语言代码为 `zh`。单个模型也可被其他推理实现消费，例如 `ChineseV6TinyModel.Detection.OpenReadAsync()`。`Model`、`PaddleOcrDetector`、`PaddleOcrClassifier`、`PaddleOcrRecognizer` 和 `PaddleOcrAll` 均提供 Stream 加载入口；解析完成后不会继续保留完整的 ONNX 原始字节。
+每个 `IPaddleOcrModelProvider` 提供 `Name`、`Kind`、`Format`、语言和版本元数据以及 `OpenRead()` / `OpenReadAsync()`。完整 OCR 组合由 `PaddleOcrModelBundle` 表达（DET、REC、字典和可选 CLS）。当前语言代码为 `zh`。单个模型也可被其他推理实现消费，例如 `ChineseV6TinyModel.Detection.OpenReadAsync()`。`PaddleOcrDetector`、`PaddleOcrClassifier`、`PaddleOcrRecognizer`、`PaddleOcrDocumentOrientationClassifier` 和 `PaddleOcrAll` 均提供 Stream 加载入口；解析完成后不会继续保留完整的 ONNX 原始字节。
 
 ## 印章文字（公章）
 
@@ -238,25 +222,56 @@ foreach (PaddleOcrLine line in result.Lines)
 
 字符框由 CTC 对齐估算（字符间空白按中点切），适合做按字覆盖、打码。默认 `false`，不需要就不付这部分开销。
 
+## 整页方向校正（0°/90°/180°/270°）
+
+扫描件或照片整页转了 90°/180°/270° 时，可以在 OCR 之前先识别方向、把页面转正。方向模型（PP-LCNet_x1_0_doc_ori）在独立的 [SimdPaddleOCR.Models](https://github.com/sdcb/SimdPaddleOCR.Models) 仓库，以 `Sdcb.SimdPaddleOCR.Models.DocumentOrientation` 包发布，只提供模型的 `Stream`：
+
+```csharp
+using Sdcb.SimdPaddleOCR.Models.DocumentOrientation;
+
+using var orientation = new PaddleOcrDocumentOrientationClassifier(DocumentOrientationModel.OpenRead());
+PaddleOcrDocumentOrientationResult o = orientation.Classify(bgr, width, height);   // o.OrientationDegrees：页面顺时针转了多少度
+
+(int w, int h) = PaddleOcrDocumentRotation.RotatedSize(width, height, o.OrientationDegrees);
+byte[] upright = new byte[w * h * 3];
+PaddleOcrDocumentRotation.Rotate(bgr, width, height, 0, ImagePixelFormat.Bgr24, o.OrientationDegrees, upright);
+PaddleOcrResult result = ocr.Run(upright, w, h);
+
+// 需要原图坐标时再映射回去（文本、分数、CTC 对齐不变）
+PaddleOcrLine[] lines = [.. result.Lines.Select(l => PaddleOcrDocumentRotation.ToSource(l, width, height, o.OrientationDegrees))];
+```
+
+它是独立的一步，不在 `PaddleOcrAll` 里；500×500 的图在 CPU 上约 3 ms。感谢 [@hnlyf168](https://github.com/hnlyf168) 在 [#32](https://github.com/sdcb/SimdPaddleOCR/pull/32) 中的实现。
+
 ## 示例
 
 四个示例共用 `examples/sample.jpg`，图片由示例负责解码为交错像素（BGR / RGB / BGRA / RGBA 均可）：
 
-- `examples/ImageSharp.AspNetCore`：ASP.NET Core + ImageSharp 3，可上传体验与 `POST /api/ocr` JSON API。
+- `examples/SimdCodecs.AspNetCore`：ASP.NET Core + SimdCodecs（纯托管解码，一次调用解码成 BGR24 并应用 EXIF 方向），可上传体验与 `POST /api/ocr` JSON API。
 - `examples/SkiaSharp.Avalonia`：Avalonia 桌面示例，SkiaSharp 解码。
 - `examples/OpenCvSharp5.Wpf`：WPF 示例，OpenCvSharp5 解码。
 - `examples/SystemDrawing.WinForms`：.NET 10 Windows / .NET Framework 4.8 双目标 WinForms 示例，使用 `Bitmap`/`LockBits`；运行 `net48` 前请安装 .NET Framework 4.8 Developer Pack，项目平台选择 x64。
 
 ```powershell
-dotnet run --project examples/ImageSharp.AspNetCore
+dotnet run --project examples/SimdCodecs.AspNetCore
 dotnet run --project examples/OpenCvSharp5.Wpf -- path/to/image.jpg
 dotnet run --project examples/SkiaSharp.Avalonia -- path/to/image.jpg
 dotnet run --project examples/SystemDrawing.WinForms --framework net10.0-windows
 ```
 
-Web 示例打开站点即可上传；API 为 `POST /api/ocr`（`multipart/form-data` 字段 `file`、`model`），文档在 `/scalar`。
+Web 示例打开站点即可上传；API 为 `POST /api/ocr`（`multipart/form-data` 字段 `file`、`model`、`characters`），文档在 `/scalar`。
 
-`Sdcb.SimdPaddleOCR` 还带 4 个 LINQPad 脚本（`imagesharp` / `skiasharp` / `opencvsharp5` / `bitmap`）：下载示例图，tiny 模型识别，控制台输出文字。`bitmap` 同时能在 LINQPad 5 / .NET Framework 4.8 和 .NET 10 上跑。包打了 `linqpad-samples` 标签，免费版也能用。
+### Docker 部署
+
+提供 `linux/amd64` 与 `linux/arm64` 多架构镜像（直接由 .NET 10 SDK `PublishContainer` 构建，无需原生依赖）：
+
+```bash
+docker run --rm -p 8080:8080 sdcb/simdpaddleocr:latest
+```
+
+访问 `http://localhost:8080` 使用 Web 界面，`/scalar` 查看交互式 API 文档，`/health` 检查健康状态。完整环境变量（模型预热、API Key 鉴权、大小限制等）与调用示例见 [`docs/docker.md`](docs/docker.md)。
+
+`Sdcb.SimdPaddleOCR` 还带 4 个 LINQPad 脚本（`simdcodecs` / `skiasharp` / `opencvsharp5` / `bitmap`）：下载示例图，tiny 模型识别，控制台输出文字。`bitmap` 同时能在 LINQPad 5 / .NET Framework 4.8 和 .NET 10 上跑。包打了 `linqpad-samples` 标签，免费版也能用。
 
 ## 常见问题
 
@@ -280,10 +295,6 @@ x64 发布 Native AOT 时，可执行项目里**必须**设置：
 
 不设的话，ILC 按 SSE2 / 128-bit `Vector<T>` 基线编译，`Avx2.IsSupported` 会被折成 `false`，AVX2 内核整段裁掉，推理会慢一截。没有 AVX2 的 CPU 不要设这项。ARM64 的 AOT 基线已带 NEON / `AdvSimd`，一般不用写 `IlcInstructionSet`。
 
-### ImageSharp 报「图片像素不是连续内存」或 `DangerousTryGetSinglePixelMemory` 失败？
-
-ImageSharp 默认分配器会把像素拆成 4MB 块，大图上拿不到一整块连续缓冲。按上面「ImageSharp 3」示例：`Clone` 一份 `Configuration` 后打开 `PreferContiguousImageBuffers`，仍不连续再 `CopyPixelDataTo`。不要改 `Configuration.Default`，否则 PNG/JPEG 解码器会丢。完整写法见 `examples/ImageSharp.AspNetCore/Program.cs`。
-
 ### 为什么 GPU 没被用上？
 
 `Auto` 按设备能力选：没有协作矩阵 / subgroup 不满足要求、或实测跑不过 CPU 的设备类型会留在 CPU。要强制走 GPU，显式指定 `OcrBackend.Vulkan` / `OcrBackend.Metal`。注意 GPU 后端只在 `net10.0` 下编译，`netstandard2.0` 只有 CPU。
@@ -299,15 +310,15 @@ ImageSharp 默认分配器会把像素拆成 4MB 块，大图上拿不到一整�
 
 |            | 说明                                                                                                                        |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------- |
-| 目标框架   | 核心 `net11.0;net10.0;netstandard2.0`；`ModelProvider` 与全部模型包为 `netstandard2.0`                                              |
+| 目标框架   | 核心 `net10.0;netstandard2.0`；`ModelProvider` 与全部模型包为 `netstandard2.0`                                              |
 | 推荐运行时 | .NET 10：完整 x86 SIMD 与 NativeAOT（`IsAotCompatible`）                                                                    |
 | 兼容运行时 | `netstandard2.0` 可在 .NET Framework 4.8 等环境使用；编译时去掉 AVX / AVX-512 / VNNI 源，走 `System.Numerics.Vector` / 标量 |
 | CI 架构    | Windows x64 / x86 / ARM64，Linux x64 / ARM64，macOS x64 / ARM64                                                             |
-| SIMD       | .NET 10 运行时探测 AVX → AVX2 → AVX-512 / VNNI；无对应指令集或 ARM 时用 Vector/标量                                         |
-| 输入       | 交错像素内存（默认 BGR24，也可 RGB24 / BGRA32 / RGBA32）；无图片路径、文件或图片库 API                                      |
+| SIMD       | .NET 10 运行时按 AVX-512 / VNNI → AVX2 → AdvSimd (ARM64 NEON) → PackedSimd (WASM SIMD128) → `Vector<float>` → 标量派发       |
+| 输入       | 交错像素内存（默认 BGR24，也可 RGB24 / BGRA32 / RGBA32 / Gray8）；无图片路径、文件或图片库 API                                      |
 | 设备       | 默认 CPU；`net10.0` 另有可选 GPU 后端（`OcrBackend`）：Vulkan 直连系统加载器（Windows `vulkan-1.dll`、Linux `libvulkan.so.1`、Android `libvulkan.so`），Metal 走 macOS 系统框架；`netstandard2.0` 只有 CPU |
-| 安卓       | 目前通过开发用宿主 `test/Sdcb.SimdPaddleOCR.AndroidBench`（`net10.0-android`，引用 `net10.0` 库，adb 驱动）在骁龙 8 Gen 3 上跑 CPU 与 Vulkan，见 [`docs/vulkan-8gen3.md`](docs/vulkan-8gen3.md)；桌面的 Vulkan 路由和 shader 没有变 |
-| WebAssembly | 通过开发用宿主 `test/Sdcb.SimdPaddleOCR.WasmBench`（`net10.0` `browser-wasm` 多线程 Web Workers + SharedArrayBuffer）跑 CPU 推理，支持 tiny / small / medium，详见 [`docs/wasm.md`](docs/wasm.md) |
+| 安卓       | 目前通过开发用宿主 `test/Sdcb.SimdPaddleOCR.AndroidBench`（`net10.0-android`，引用 `net10.0` 库，adb 驱动）在骁龙 8 Gen 3 上跑 CPU 与 Vulkan，见 [`docs/perf/8gen3-adreno750.md`](docs/perf/8gen3-adreno750.md)；桌面的 Vulkan 路由和 shader 没有变 |
+| WebAssembly | 通过开发用宿主 `test/Sdcb.SimdPaddleOCR.WasmBench`（`net10.0` `browser-wasm` 多线程 Web Workers + SharedArrayBuffer）跑 CPU 推理，支持 tiny / small / medium，详见 [`docs/perf/wasm-5800x.md`](docs/perf/wasm-5800x.md) |
 | NativeAOT  | 裁剪发布时请保留核心程序集和所用模型程序集                                                                                  |
 
 ## 许可证与第三方组件
@@ -319,8 +330,7 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 
 - PP-OCRv6 DET/REC、TextLineOrientation CLS 及字典来自 PaddleOCR 生态，来源资料标记为
   Apache-2.0；发布模型包时请保留来源和许可证说明。
-- 示例依赖遵循各自上游许可证；特别是 ImageSharp 3.x 使用 Six Labors Split License，
-  不是普通 MIT 许可证。
+- 示例依赖遵循各自上游许可证。
 
 完整的第三方归属和分发说明见
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。PaddleOCR、PP-OCR 及相关名称归其
@@ -328,21 +338,21 @@ Apache-2.0 提供明确的专利授权条款，更适合公开发布的库和 Nu
 
 ## 性能
 
-**2.0** 新增纯 C# GPU 后端（Vulkan / Metal），medium 端到端相对同机 CPU：
+纯 C# GPU 后端（Vulkan / Metal）与多平台 CPU 实测（`dataset/` 100 张，`medium` 端到端相对同机 CPU）：
 
-| 设备                      | 后端                 | 相对同机 CPU（medium）    |
-| ------------------------- | -------------------- | ------------------------: |
-| RTX 3080 Ti               | Vulkan（协作矩阵）   |                  **14.4×** |
-| Intel Arc B580            | Vulkan（协作矩阵）   |                   **9.6×** |
-| Apple M4（虚拟机）        | Metal                |                   **6.47×** |
-| AMD Radeon 880M 核显      | Vulkan（协作矩阵）   |                   **4.3×** |
-| 骁龙 8 Gen 3 / Adreno 750 | Vulkan（无协作矩阵） |                 **约 2.2×** |
-| Intel UHD 770 核显        | Vulkan（无协作矩阵） | 慢于 CPU，`Auto` 默认走 CPU |
+| 设备                      | 后端                 | `medium` 中位 | 相对同机 CPU |
+| ------------------------- | -------------------- | ------------: | -----------: |
+| RTX 3080 Ti (5800X)       | Vulkan（协作矩阵）   |    **49.0 ms** |    **11.1×** |
+| Intel Arc B580 (5950X)    | Vulkan（协作矩阵）   |    **53.3 ms** |     **9.8×** |
+| AMD Radeon 880M (AI9 H365)| Vulkan（协作矩阵）   |   **121.3 ms** |     **6.2×** |
+| 骁龙 8 Gen 3 / Adreno 750 | Vulkan（无协作矩阵） |   **652.2 ms** |     **4.1×** |
+| Intel UHD 770 核显        | Vulkan（无协作矩阵） | 慢于 CPU，`Auto` 默认走 CPU | — |
 
-CPU 路径在 2.0 也普遍再快 **4–15%**（CTC ArgMax 并行化、动态 intra-op 线程预算、DET 后处理重写；ARM64 另有手写 AdvSIMD MatMul）。
-WebAssembly（`browser-wasm` 多线程 + LLVM AOT + WASM SIMD128 `PackedSimd` 内核）下 tiny 中位 **113 ms/张**（Ryzen 7 5800X），约为同机桌面原生的 2.5 倍。
+WebAssembly（`browser-wasm` 多线程 + LLVM AOT + WASM SIMD128 `PackedSimd` 内核）下 `tiny` 中位 **95.2 ms/张**（Ryzen 7 5800X），约为同机桌面原生的 1.9 倍。
 
-每台设备的完整跑分、精度表和复现命令见 [`docs/perf.md`](docs/perf.md) 与 `docs/` 下各机型报告（`vulkan-*.md`、`metal-m4.md`、`wasm.md`）。
+> 相比 `v2.0.0`，切换到内嵌 `SimdOnnx` 引擎后全平台实测无退化且普遍提速：CPU `small` 快 **20–47%**、WebAssembly 快 **18–34%**（`tiny` 127.2 → 95.2 ms）、安卓骁龙 8 Gen 3 Vulkan `medium` 快 **30%**、桌面 Vulkan 峰值内存进一步下降（RTX 3080 Ti `medium` 994 → 912 MB），同像素输入下 100/100 逐张一致。
+
+各机型的完整跑分、精度表与复现命令见总目录 [`docs/perf.md`](docs/perf.md)（分机型报告均位于 `docs/perf/`）。
 
 ## 性能复现
 
@@ -362,6 +372,6 @@ WebAssembly（`browser-wasm` 多线程 + LLVM AOT + WASM SIMD128 `PackedSimd` �
 
 ## 微信群
 
-![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1012)
+![](https://io.starworks.cc:88/cv-public/2026/ocr-wxg-qr.png?1110)
 
 如果微信群二维码过期了，请加入 QQ 群 [C#/.NET计算机视觉技术交流 579060605](https://qm.qq.com/q/bPw5jAK4qk)。

@@ -55,7 +55,7 @@ public static class OcrVulkan
     {
         if (string.IsNullOrWhiteSpace(text))
             return new VulkanSelector(true, -1, null);
-        string trimmed = text.Trim();
+        string trimmed = text!.Trim();
         if (int.TryParse(trimmed, NumberStyles.None, CultureInfo.InvariantCulture, out int index)
             && index >= 0
             && index.ToString(CultureInfo.InvariantCulture) == trimmed)
@@ -92,14 +92,27 @@ public static class OcrVulkan
         return requested;
     }
 
-    /// <summary>Creates the shared device if a Vulkan loader and GPU exist.</summary>
+    /// <summary>
+    /// Creates the shared Sdcb.SimdOnnx device when a Vulkan loader and GPU exist.
+    /// <see cref="DeviceSelector"/> is retained for callers, but the engine picks
+    /// the first discrete device itself and does not read that selector.
+    /// </summary>
     public static VulkanDeviceInfo? TryProbe()
     {
 #if NETSTANDARD2_0
         return null;
 #else
-        Backends.Vulkan.VkDevice? dev = Backends.Vulkan.GpuBackend.TryGetDevice();
-        return dev?.Info;
+        if (!string.IsNullOrWhiteSpace(EffectiveSelector))
+            Warn("OcrVulkan.DeviceSelector is ignored; Sdcb.SimdOnnx picks the first discrete Vulkan device.");
+        if (!Sdcb.SimdOnnx.Backends.Vulkan.VkBackend.TryGetDefault(out Sdcb.SimdOnnx.Backends.Vulkan.VkBackend? backend))
+            return null;
+        Sdcb.SimdOnnx.Backends.GpuDeviceInfo device = backend.Device;
+        NoteDevice(device.Name, "engine");
+        NoteCoopGemm(device.CooperativeMatrixFp16);
+        VulkanDeviceInfo info = new(0, device.Name, device.UnifiedMemory ? "integrated" : "discrete",
+            device.DeviceLocalBytes, BufferByteCap(device.DeviceLocalBytes), Selected: true);
+        SetDevices([info]);
+        return info;
 #endif
     }
 
@@ -199,7 +212,6 @@ public static class OcrVulkan
     private static int s_cacheRestored;
     private static int s_coopGemm;
     private static int s_deviceLost;
-    private static int s_gpuDisabled;
 
     public static string DeviceName => s_deviceName;
     public static string FenceWait => s_fenceWait;
@@ -210,10 +222,16 @@ public static class OcrVulkan
     public static double InitMs => TicksToMs(Interlocked.Read(ref s_initTicks));
     /// <summary>Device advertises a cooperative-matrix GEMM the graph can use.</summary>
     public static bool CoopGemm => s_coopGemm != 0;
-    /// <summary>VK_ERROR_DEVICE_LOST seen in this process. Later GPU sessions stay on CPU.</summary>
+    /// <summary>
+    /// VK_ERROR_DEVICE_LOST events seen in this process. Sdcb.SimdOnnx recreates the
+    /// device and falls that session back to CPU after repeated losses.
+    /// </summary>
     public static int DeviceLostCount => Volatile.Read(ref s_deviceLost);
-    /// <summary>Set after the first device-lost. Every session then serves from CPU.</summary>
-    public static bool GpuDisabled => Volatile.Read(ref s_gpuDisabled) != 0;
+    /// <summary>
+    /// The previous in-tree backend pinned the process to CPU after one device loss.
+    /// Sdcb.SimdOnnx recreates the device instead, so this is always false.
+    /// </summary>
+    public static bool GpuDisabled => false;
 
     /// <summary>
     /// Recognition lines per submit on a small GPU. Under 4 GB, or without
@@ -341,13 +359,12 @@ public static class OcrVulkan
         return false;
     }
 
-    /// <summary>First call logs once and pins every later session to CPU.</summary>
+    /// <summary>Counts a device loss. The engine recreates the device; GPU is not pinned off.</summary>
     internal static void NoteDeviceLost(string where)
     {
         int n = Interlocked.Increment(ref s_deviceLost);
-        Volatile.Write(ref s_gpuDisabled, 1);
         if (n == 1)
-            Warn($"Vulkan device lost ({where}); OCR stays on CPU for the rest of this process");
+            Warn($"Vulkan device lost ({where}); this call finishes on CPU and the device is recreated");
     }
 
     internal static void NotePipelineCache(string path, bool restored)

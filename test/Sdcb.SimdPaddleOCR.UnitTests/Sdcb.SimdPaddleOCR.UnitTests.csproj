@@ -1,7 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net11.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>preview</LangVersion>
@@ -24,7 +24,7 @@
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseNs20Library)' == 'true'">
-    <!-- SetTargetFramework does not flow ns2.0 PackageReferences into the net11 host deps.json. -->
+    <!-- SetTargetFramework does not flow ns2.0 PackageReferences into the net10 host deps.json. -->
     <PackageReference Include="Microsoft.Bcl.Numerics" Version="10.0.11" />
   </ItemGroup>
   <ItemGroup>
@@ -40,6 +40,9 @@
     <Content Include="assets\seal.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Fixtures/FusedCtcScore.onnx.gz" />
+    <EmbeddedResource Include="Fixtures/DocOrientationTiny*.onnx.gz" LogicalName="Fixtures.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/Orientation/preprocess.json" LogicalName="Assets.Orientation.preprocess.json" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>

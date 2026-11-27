@@ -1,7 +1,3 @@
-#if !USE_NS20_LIBRARY
-using Sdcb.SimdPaddleOCR.Backends.Metal;
-#endif
-
 namespace Sdcb.SimdPaddleOCR.UnitTests;
 
 public class VulkanBudgetTests
@@ -133,14 +129,15 @@ public class MetalShaderTests
     {
         var assembly = typeof(OcrBackend).Assembly;
         string[] embedded = assembly.GetManifestResourceNames()
-            .Where(name => name.StartsWith("Sdcb.SimdPaddleOCR.Backends.Metal.Shaders.", StringComparison.Ordinal)
+            .Where(name => name.StartsWith("Sdcb.SimdOnnx.Backends.Metal.Shaders.", StringComparison.Ordinal)
                            && name.EndsWith(".metal", StringComparison.Ordinal))
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
-        string[] listed = MetalShaders.Names.OrderBy(name => name, StringComparer.Ordinal).ToArray();
-        Assert.Equal(listed, embedded);
-        string source = MetalShaders.LoadSource(assembly);
-        Assert.Contains("kernel", source, StringComparison.Ordinal);
+        Assert.Contains("Sdcb.SimdOnnx.Backends.Metal.Shaders.conv.metal", embedded);
+        using Stream? stream = assembly.GetManifestResourceStream(embedded[0]);
+        Assert.NotNull(stream);
+        using StreamReader reader = new(stream);
+        Assert.Contains("kernel", reader.ReadToEnd(), StringComparison.Ordinal);
     }
 
     [Fact]
